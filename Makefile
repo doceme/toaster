@@ -56,7 +56,7 @@ SYSCLOCK_CL = SYSCLK_FREQ_24MHz=24000000
 OUTDIR = build
 
 # Target file name (without extension).
-TARGET = template
+TARGET = toaster
 
 # Paths
 COMMONDIR = common
@@ -89,7 +89,7 @@ SRC += $(CMSISDIR)/DeviceSupport/ST/STM32F10x/system_stm32f10x.c
 SRC += $(STMSPDSRCDIR)/stm32f10x_bkp.c
 #SRC += $(STMSPDSRCDIR)/stm32f10x_crc.c
 #SRC += $(STMSPDSRCDIR)/stm32f10x_dac.c
-#SRC += $(STMSPDSRCDIR)/stm32f10x_dma.c
+SRC += $(STMSPDSRCDIR)/stm32f10x_dma.c
 SRC += $(STMSPDSRCDIR)/stm32f10x_exti.c
 SRC += $(STMSPDSRCDIR)/stm32f10x_flash.c
 SRC += $(STMSPDSRCDIR)/stm32f10x_gpio.c
@@ -97,9 +97,9 @@ SRC += $(STMSPDSRCDIR)/stm32f10x_gpio.c
 SRC += $(STMSPDSRCDIR)/stm32f10x_pwr.c
 SRC += $(STMSPDSRCDIR)/stm32f10x_rcc.c
 SRC += $(STMSPDSRCDIR)/stm32f10x_rtc.c
-#SRC += $(STMSPDSRCDIR)/stm32f10x_spi.c
-#SRC += $(STMSPDSRCDIR)/stm32f10x_tim.c
-#SRC += $(STMSPDSRCDIR)/stm32f10x_usart.c
+SRC += $(STMSPDSRCDIR)/stm32f10x_spi.c
+SRC += $(STMSPDSRCDIR)/stm32f10x_tim.c
+SRC += $(STMSPDSRCDIR)/stm32f10x_usart.c
 SRC += $(STMSPDSRCDIR)/misc.c
 
 ## RTOS
