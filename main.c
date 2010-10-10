@@ -43,16 +43,24 @@ static void main_noreturn(void) NORETURN;
 static BitAction led_user = Bit_SET;
 static BitAction led_rtc = Bit_SET;
 
-static uint16_t oven_temp = 0;
+static uint16_t tc_temp = 0;
+static uint8_t tc_open = 1;
+
+#define USART		USART1
+#define USART_GPIO	GPIOA
+#define USART_PIN_TX	GPIO_Pin_9
 
 #define SPI_MASTER	SPI2
-// TODO: Still must modify USART_Configuration when changing USART
-#define USART		USART1
-
 #define SPI_GPIO	GPIOB
 #define SPI_PIN_SCK	GPIO_Pin_13
 #define SPI_PIN_MISO	GPIO_Pin_14
 #define SPI_PIN_NSS	GPIO_Pin_12
+
+#define MAX6675_MASK_STATE	0x1
+#define MAX6675_MASK_DEVICE_ID	0x2
+#define MAX6675_MASK_TC_INPUT	0x4
+#define MAX6675_MASK_TC_TEMP	0x7ff8
+#define MAX6675_MASK_DUMMY	0x8000
 
 void assert_failed(uint8_t *function, uint32_t line)
 {
@@ -82,9 +90,9 @@ int main(void)
 inline void main_noreturn(void)
 {
 	RCC_Configuration();
+	GPIO_Configuration();
 	USART_Configuration();
 	tprintf("\r\nBooting Toaster Application Version 1.0...\r\n");
-	GPIO_Configuration();
 	EXTI_Configuration();
 	RTC_Configuration();
 	NVIC_Configuration();
@@ -105,7 +113,7 @@ void RCC_Configuration(void)
 	RCC_APB1PeriphClockCmd(RCC_APB1Periph_PWR | RCC_APB1Periph_BKP | RCC_APB1Periph_SPI2, ENABLE);
 
 	/* Enable GPIO clocks */
-	RCC_APB2PeriphClockCmd(RCC_APB2Periph_GPIOA | RCC_APB2Periph_GPIOB | RCC_APB2Periph_GPIOC, ENABLE);
+	RCC_APB2PeriphClockCmd(RCC_APB2Periph_AFIO | RCC_APB2Periph_GPIOA | RCC_APB2Periph_GPIOB | RCC_APB2Periph_GPIOC | RCC_APB2Periph_USART1, ENABLE);
 }
 
 /**
@@ -121,7 +129,7 @@ void GPIO_Configuration(void)
 	GPIO_WriteBit(GPIOC, GPIO_Pin_8 | GPIO_Pin_9, Bit_SET);
 	GPIO_InitStructure.GPIO_Pin = GPIO_Pin_8 | GPIO_Pin_9;
 	GPIO_InitStructure.GPIO_Mode = GPIO_Mode_Out_PP;
-	GPIO_InitStructure.GPIO_Speed = GPIO_Speed_2MHz;
+	GPIO_InitStructure.GPIO_Speed = GPIO_Speed_10MHz;
 	GPIO_Init(GPIOC, &GPIO_InitStructure);
 
 	/* Configure button input floating */
@@ -130,15 +138,13 @@ void GPIO_Configuration(void)
 	GPIO_Init(GPIOA, &GPIO_InitStructure);
 
 	/* Configure SPI_MASTER pins: SCK, MISO and MOSI */
-	GPIO_InitStructure.GPIO_Pin = SPI_PIN_SCK | SPI_PIN_NSS;
-	GPIO_InitStructure.GPIO_Speed = GPIO_Speed_50MHz;
-	GPIO_InitStructure.GPIO_Mode = GPIO_Mode_Out_PP;
+	GPIO_InitStructure.GPIO_Pin = SPI_PIN_SCK | SPI_PIN_MISO | SPI_PIN_NSS;
+	GPIO_InitStructure.GPIO_Mode = GPIO_Mode_AF_PP;
 	GPIO_Init(SPI_GPIO, &GPIO_InitStructure);
 
-	GPIO_InitStructure.GPIO_Pin = SPI_PIN_MISO;
-	GPIO_InitStructure.GPIO_Speed = GPIO_Speed_50MHz;
-	GPIO_InitStructure.GPIO_Mode = GPIO_Mode_AIN;
-	GPIO_Init(SPI_GPIO, &GPIO_InitStructure);
+	/* Configure pinout for UART1 */
+	GPIO_InitStructure.GPIO_Pin = USART_PIN_TX;
+	GPIO_Init(USART_GPIO, &GPIO_InitStructure);
 
 	/* Connect Button EXTI Line to Button GPIO Pin */
 	GPIO_EXTILineConfig(GPIO_PortSourceGPIOA, GPIO_PinSource0);
@@ -152,15 +158,6 @@ void GPIO_Configuration(void)
 void USART_Configuration(void)
 {
 	USART_InitTypeDef USART_InitStructure;
-	GPIO_InitTypeDef GPIO_InitStructure;
-
-	RCC_APB2PeriphClockCmd(RCC_APB2Periph_USART1 | RCC_APB2Periph_GPIOA | RCC_APB2Periph_AFIO, ENABLE);
-
-	/* Configure pinout for UART1 */
-	GPIO_InitStructure.GPIO_Pin = GPIO_Pin_9; // UART1 Tx PA 9
-	GPIO_InitStructure.GPIO_Mode = GPIO_Mode_AF_PP;
-	GPIO_InitStructure.GPIO_Speed = GPIO_Speed_50MHz;
-	GPIO_Init(GPIOA, &GPIO_InitStructure);
 
 	/* Configure the USART */
 	USART_InitStructure.USART_BaudRate = 115200;
@@ -291,13 +288,13 @@ void SPI_Configuration(void)
 	SPI_InitTypeDef SPI_InitStructure;
 
 	/* Initialize SPI Master */
-	SPI_InitStructure.SPI_Direction = SPI_Direction_2Lines_FullDuplex;
+	SPI_InitStructure.SPI_Direction = SPI_Direction_1Line_Rx; //SPI_Direction_2Lines_FullDuplex;
 	SPI_InitStructure.SPI_Mode = SPI_Mode_Master;
 	SPI_InitStructure.SPI_DataSize = SPI_DataSize_16b;
 	SPI_InitStructure.SPI_CPOL = SPI_CPOL_Low;
 	SPI_InitStructure.SPI_CPHA = SPI_CPHA_2Edge;
 	SPI_InitStructure.SPI_NSS = SPI_NSS_Hard;
-	SPI_InitStructure.SPI_BaudRatePrescaler = SPI_BaudRatePrescaler_8;
+	SPI_InitStructure.SPI_BaudRatePrescaler = SPI_BaudRatePrescaler_64;
 	SPI_InitStructure.SPI_FirstBit = SPI_FirstBit_MSB;
 	SPI_InitStructure.SPI_CRCPolynomial = 7;
 	SPI_Init(SPI_MASTER, &SPI_InitStructure);
@@ -307,9 +304,6 @@ void SPI_Configuration(void)
 
 	/* Enable SPI interrupt */
 	SPI_I2S_ITConfig(SPI_MASTER, SPI_I2S_IT_RXNE, ENABLE);
-
-	/* Enable SPI_MASTER */
-	SPI_Cmd(SPI_MASTER, ENABLE);
 }
 
 /**
@@ -338,7 +332,10 @@ void RTC_IRQHandler(void)
 		uint32_t counter = RTC_GetCounter();
 
 		/* Start temperature read */
-		SPI_I2S_SendData(SPI_MASTER, 0);
+		//SPI_I2S_SendData(SPI_MASTER, 0);
+
+		/* Enable SPI_MASTER */
+		SPI_Cmd(SPI_MASTER, ENABLE);
 
 		/* Wait until last write operation on RTC registers has finished */
 		RTC_WaitForLastTask();
@@ -363,8 +360,14 @@ void RTC_IRQHandler(void)
   */
 void SPI2_IRQHandler(void)
 {
-	oven_temp = SPI_I2S_ReceiveData(SPI_MASTER) * 3;
+	/* Disable SPI_MASTER */
+	SPI_Cmd(SPI_MASTER, DISABLE);
+
+	uint16_t data = SPI_I2S_ReceiveData(SPI_MASTER);
+	//tc_temp = ((data & MAX6675_MASK_TC_TEMP) >> 3) * 3;
+	//tc_open = ((data & MAX6675_MASK_TC_INPUT) >> 2);
 	GPIO_WriteBit(GPIOC, GPIO_Pin_9, led_rtc);
 	led_rtc ^= 1;
-	//tprintf("%d c\r\n");
+	//tprintf("%d c (%d)\r\n", tc_temp, tc_open);
+	tprintf("0x%04x\r\n", data);
 }
