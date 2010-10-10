@@ -277,7 +277,7 @@ LDFLAGS +=-T$(LINKERSCRIPTPATH)/$(CHIP).ld
 #
 OOCD_LOADFILE+=$(OUTDIR)/$(TARGET).elf
 # if OpenOCD is in the $PATH just set OPENOCDEXE=openocd
-OOCD_EXE=/usr/local/bin/openocd
+OOCD_EXE=openocd
 # debug level
 OOCD_CL=-d0
 # interface and board/target settings (using the OOCD target-library here)
