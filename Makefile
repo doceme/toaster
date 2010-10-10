@@ -78,7 +78,7 @@ RTOSINCDIR = $(RTOSSRCDIR)/include
 SRC =  main.c
 
 ## COMMON:
-#SRC =  $(COMMONDIR)/tprintf.c
+SRC +=  $(COMMONDIR)/tprintf.c
 
 ## CMSIS for STM32
 SRC += $(CMSISDIR)/CoreSupport/core_cm3.c
@@ -277,7 +277,7 @@ LDFLAGS +=-T$(LINKERSCRIPTPATH)/$(CHIP).ld
 #
 OOCD_LOADFILE+=$(OUTDIR)/$(TARGET).elf
 # if OpenOCD is in the $PATH just set OPENOCDEXE=openocd
-OOCD_EXE=/home/doceme/sandbox/openocd/bin/openocd
+OOCD_EXE=/usr/local/bin/openocd
 # debug level
 OOCD_CL=-d0
 # interface and board/target settings (using the OOCD target-library here)

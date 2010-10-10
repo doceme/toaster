@@ -1,9 +1,10 @@
 /**
  ******************************************************************************
  *
- * @file       discovery.c
+ * @file       main.c
  * @author     Stephen Caudle Copyright (C) 2010
- * @brief      Main marquee implementation
+ * @author     Michael Spradling Copyright (C) 2010
+ * @brief      Main toaster application
  * @see        The GNU Public License (GPL) Version 3
  *
  *****************************************************************************/
@@ -27,11 +28,12 @@
 #include <stm32f10x.h>
 #include <stm32f10x_conf.h>
 #include "common.h"
+#include "tprintf.h"
 
 /* Function Prototypes */
 static void RCC_Configuration(void);
 static void GPIO_Configuration(void);
-static void UART_Configuration(void);
+static void USART_Configuration(void);
 static void EXTI_Configuration(void);
 static void RTC_Configuration(void);
 static void NVIC_Configuration(void);
@@ -44,6 +46,7 @@ static BitAction led_rtc = Bit_SET;
 static uint16_t oven_temp = 0;
 
 #define SPI_MASTER	SPI2
+// TODO: Still must modify USART_Configuration when changing USART
 #define USART		USART1
 
 #define SPI_GPIO	GPIOB
@@ -56,20 +59,17 @@ void assert_failed(uint8_t *function, uint32_t line)
 	while (1);
 }
 
-#if 0
 /**
  * @brief  Retargets the C library printf function to the USART.
  * @param  None
  * @retval None
  */
-int outbyte(int ch)
-{
--»»»»»»»while (USART_GetFlagStatus(USART1, USART_FLAG_TXE) == RESET);
--»»»»»»»USART_SendData(USART, (uint8_t)ch);
--»»»»»»»while (USART_GetFlagStatus(USART1, USART_FLAG_TC) == RESET);
--»»»»»»»return ch;
+int outbyte(int ch) {
+	while (USART_GetFlagStatus(USART, USART_FLAG_TXE) == RESET);
+	USART_SendData(USART, (uint8_t)ch);
+	while (USART_GetFlagStatus(USART, USART_FLAG_TC) == RESET);
+	return ch;
 }
-#endif
 
 /**
  * Main function
@@ -82,12 +82,14 @@ int main(void)
 inline void main_noreturn(void)
 {
 	RCC_Configuration();
-	GPIO_Configuration();
 	USART_Configuration();
+	tprintf("\r\nBooting Toaster Application Version 1.0...\r\n");
+	GPIO_Configuration();
 	EXTI_Configuration();
 	RTC_Configuration();
 	NVIC_Configuration();
 	SPI_Configuration();
+	tprintf("Init Complete.\r\n");
 
 	while (1);
 }
@@ -150,6 +152,15 @@ void GPIO_Configuration(void)
 void USART_Configuration(void)
 {
 	USART_InitTypeDef USART_InitStructure;
+	GPIO_InitTypeDef GPIO_InitStructure;
+
+	RCC_APB2PeriphClockCmd(RCC_APB2Periph_USART1 | RCC_APB2Periph_GPIOA | RCC_APB2Periph_AFIO, ENABLE);
+
+	/* Configure pinout for UART1 */
+	GPIO_InitStructure.GPIO_Pin = GPIO_Pin_9; // UART1 Tx PA 9
+	GPIO_InitStructure.GPIO_Mode = GPIO_Mode_AF_PP;
+	GPIO_InitStructure.GPIO_Speed = GPIO_Speed_50MHz;
+	GPIO_Init(GPIOA, &GPIO_InitStructure);
 
 	/* Configure the USART */
 	USART_InitStructure.USART_BaudRate = 115200;
@@ -158,6 +169,7 @@ void USART_Configuration(void)
 	USART_InitStructure.USART_Parity = USART_Parity_No;
 	USART_InitStructure.USART_HardwareFlowControl = USART_HardwareFlowControl_None;
 	USART_InitStructure.USART_Mode = USART_Mode_Tx;
+
 	USART_Init(USART, &USART_InitStructure);
 
 	/* Enable the USART */
