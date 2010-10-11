@@ -89,10 +89,13 @@
 #define MAX6675_MASK_TC_TEMP	0x7ff8
 #define MAX6675_MASK_DUMMY	0x8000
 
+/* All time data is in milliseconds unless otherwise stated */
+/* All temperature data is in degrees Celcius unless otherwise stated */
+/* All rate data is in degrees Celcius per second unless otherwise stated */
+
 enum thermal_state
 {
 	OFF,
-	WARMUP,
 	PREHEAT_RAMPUP,
 	PREHEAT,
 	REFLOW_RAMPUP,
@@ -103,15 +106,37 @@ enum thermal_state
 struct thermocouple
 {
 	uint16_t temp;
+	uint16_t temp_prev;
 	uint8_t open;
+};
+
+struct limits
+{
+	uint16_t preheat_temp_min;
+	uint16_t preheat_temp_max;
+	uint32_t preheat_time_min;
+	uint32_t preheat_time_max;
+	float preheat_rampup_rate;
+	float preheat_rate;
+	uint16_t reflow_temp_min;
+	uint16_t reflow_temp_max;
+	uint32_t reflow_time_min;
+	uint32_t reflow_time_max;
+	float reflow_rampup_rate;
+	float reflow_rate;
+	uint16_t cooldown_temp_min;
+	uint32_t cooldown_time_max;
+	float cooldown_rate;
 };
 
 struct toaster
 {
 	enum thermal_state state;
 	struct thermocouple tc;
-	uint32_t elapsed; /* in milliseconds */
-	uint32_t counter; /* in milliseconds */
+	uint32_t elapsed;
+	uint32_t counter;
+	uint8_t max_preheat_reached;
+	uint8_t max_reflow_reached;
 	BitAction led_blue;
 };
 
@@ -127,12 +152,29 @@ static void TIM_Configuration(void);
 static void main_noreturn(void) NORETURN;
 
 static void toaster_off();
-static void toaster_warmup();
 static void toaster_preheat();
 static void toaster_reflow();
 static void toaster_cooldown();
 
 static struct toaster oven;
+static struct limits profile =
+{
+	.preheat_temp_min = 100,
+	.preheat_temp_max = 150,
+	.preheat_time_min = 60 * 1000,
+	.preheat_time_max = 120 * 1000,
+	.reflow_temp_min = 183,
+	.reflow_temp_max = 235,
+	.reflow_time_min = 10 * 1000,
+	.reflow_time_max = 20 * 1000,
+	.preheat_rampup_rate = 2,
+	.preheat_rate = 0.5,
+	.reflow_rampup_rate = 2.5,
+	.reflow_rate = 3,
+	.cooldown_temp_min = 50,
+	.cooldown_time_max = 10 * 60 * 1000,
+	.cooldown_rate = 5,
+};
 
 void assert_failed(uint8_t *function, uint32_t line)
 {
@@ -436,7 +478,7 @@ void EXTI0_IRQHandler(void)
 	{
 		case OFF:
 		{
-			toaster_warmup();
+			toaster_preheat();
 		} break;
 
 		default:
@@ -493,15 +535,13 @@ void SPI2_IRQHandler(void)
 	data = SPI_I2S_ReceiveData(SPI);
 
 	/* Set thermocouple data */
+	oven.tc.temp_prev = oven.tc.temp;
 	oven.tc.temp = ((data & MAX6675_MASK_TC_TEMP) >> 3) >> 2;
 	oven.tc.open = ((data & MAX6675_MASK_TC_INPUT) >> 2);
 
-	if (!oven.tc.open)
+	if (oven.tc.open)
 	{
-		tprintf("%d,%d\r\n", oven.elapsed, oven.tc.temp);
-	}
-	else
-	{
+		toaster_off();
 		tprintf("Thermocouple is open!\r\n");
 	}
 }
@@ -517,12 +557,89 @@ void TIM7_IRQHandler(void)
 	TIM_ClearITPendingBit(TIMER, TIM_IT_Update);
 
 	oven.elapsed++;
+	oven.counter++;
 
 	/* Activate slave select */
 	GPIO_WriteBit(SPI_GPIO, SPI_PIN_NSS, Bit_RESET);
 
 	/* Start temperature read */
 	SPI_I2S_SendData(SPI, 0);
+
+	if (oven.elapsed % 3000 == 0)
+	{
+		tprintf("%d,%d\r\n", oven.elapsed, oven.tc.temp);
+	}
+
+	switch (oven.state)
+	{
+		case PREHEAT_RAMPUP:
+		case PREHEAT:
+		{
+			toaster_preheat();
+		} break;
+
+		case REFLOW_RAMPUP:
+		case REFLOW:
+		{
+			toaster_reflow();
+		} break;
+
+		case COOLDOWN:
+		{
+			toaster_cooldown();
+		} break;
+
+		default:
+		{
+			toaster_off();
+			tprintf("Invalid state!\r\n");
+		} break;
+	}
+}
+
+void toaster_goto(enum thermal_state state)
+{
+	switch (state)
+	{
+		case OFF:
+		{
+			tprintf(">OFF\r\n");
+		} break;
+
+		case PREHEAT_RAMPUP:
+		{
+			tprintf(">PREHEAT_RAMPUP\r\n");
+		} break;
+
+		case PREHEAT:
+		{
+			tprintf(">PREHEAT\r\n");
+		} break;
+
+		case REFLOW_RAMPUP:
+		{
+			tprintf(">REFLOW_RAMPUP\r\n");
+		} break;
+
+		case REFLOW:
+		{
+			tprintf(">REFLOW\r\n");
+		} break;
+
+		case COOLDOWN:
+		{
+			tprintf(">COOLDOWN\r\n");
+		} break;
+
+		default:
+		{
+			tprintf("Invalid state!\r\n");
+			toaster_off();
+		} return;
+	}
+
+	oven.counter = 0;
+	oven.state = state;
 }
 
 void toaster_off()
@@ -538,13 +655,12 @@ void toaster_off()
 
 	/* Turn off blue LED */
 	GPIO_WriteBit(LED_GPIO, LED_PIN_BLUE, Bit_RESET);
-
 	oven.led_blue = 0;
-	oven.state = OFF;
-	tprintf(">OFF\r\n");
+
+	toaster_goto(OFF);
 }
 
-void toaster_warmup()
+void toaster_preheat()
 {
 	if (oven.state == OFF)
 	{
@@ -557,26 +673,28 @@ void toaster_warmup()
 		/* Enable timer counter */
 		TIM_Cmd(TIMER, ENABLE);
 
-		oven.counter = 0;
-		oven.state = WARMUP;
-		tprintf(">WARMUP\r\n");
-	}
-	else if (oven.state != WARMUP)
-	{
-		toaster_off();
-		tprintf("Invalid state!\r\n");
-	}
-}
+		/* Reset toaster variables */
+		oven.elapsed = 0;
+		oven.max_preheat_reached = 0;
+		oven.max_reflow_reached = 0;
 
-void toaster_preheat()
-{
-	if (oven.state == WARMUP)
-	{
-		oven.counter = 0;
-		oven.state = PREHEAT_RAMPUP;
-		tprintf(">PREHEAT_RAMPUP\r\n");
+		toaster_goto(PREHEAT_RAMPUP);
 	}
-	else if (oven.state != PREHEAT_RAMPUP)
+	else if (oven.state == PREHEAT_RAMPUP)
+	{
+		if (oven.tc.temp >= profile.preheat_temp_min)
+		{
+			toaster_goto(PREHEAT);
+		}
+	}
+	else if (oven.state == PREHEAT)
+	{
+		if (oven.counter >= profile.preheat_time_max)
+		{
+			toaster_reflow();
+		}
+	}
+	else
 	{
 		toaster_off();
 		tprintf("Invalid state!\r\n");
@@ -587,11 +705,23 @@ void toaster_reflow()
 {
 	if (oven.state == PREHEAT)
 	{
-		oven.counter = 0;
-		oven.state = REFLOW_RAMPUP;
-		tprintf(">REFLOW_RAMPUP\r\n");
+		toaster_goto(REFLOW_RAMPUP);
 	}
 	else if (oven.state != REFLOW_RAMPUP)
+	{
+		if (oven.tc.temp >= profile.reflow_temp_min)
+		{
+			toaster_goto(REFLOW);
+		}
+	}
+	else if (oven.state != REFLOW)
+	{
+		if (oven.counter >= profile.reflow_time_max)
+		{
+			toaster_cooldown();
+		}
+	}
+	else
 	{
 		toaster_off();
 		tprintf("Invalid state!\r\n");
@@ -600,10 +730,19 @@ void toaster_reflow()
 
 void toaster_cooldown()
 {
-	if (oven.state != OFF && oven.state != COOLDOWN)
+	if (oven.state != OFF)
 	{
-		oven.counter = 0;
-		oven.state = COOLDOWN;
-		tprintf(">COOLDOWN\r\n");
+		if (oven.state != COOLDOWN)
+		{
+			toaster_goto(COOLDOWN);
+		}
+		else
+		{
+			if (oven.tc.temp <= profile.cooldown_temp_min ||
+				oven.counter >= profile.cooldown_time_max)
+			{
+				toaster_off();
+			}
+		}
 	}
 }
