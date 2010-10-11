@@ -65,6 +65,9 @@ STMLIBDIR = $(STM32DIR)/Libraries
 STMSPDDIR = $(STMLIBDIR)/STM32F10x_StdPeriph_Driver
 STMSPDSRCDIR = $(STMSPDDIR)/src
 STMSPDINCDIR = $(STMSPDDIR)/inc
+STMDSPDIR = $(STMLIBDIR)/STM32F10x_DSP_Lib
+STMDSPSRCDIR = $(STMDSPDIR)/src
+STMDSPINCDIR = $(STMDSPDIR)/inc
 CMSISDIR  = $(STMLIBDIR)/CMSIS/CM3
 RTOSDIR = freertos
 RTOSSRCDIR = $(RTOSDIR)/FreeRTOS/Source
@@ -135,6 +138,7 @@ CPPSRCARM =
 # it will preserve the spelling of the filenames, and gcc itself does
 # care about how the name is spelled on its command-line.
 ASRC = $(CMSISDIR)/DeviceSupport/ST/STM32F10x/startup/gcc_ride7/startup_stm32f10x_$(MODEL).s
+ASRC += $(STMDSPSRCDIR)/asm/gcc/PID_stm32.s
 
 # List Assembler source files here which must be assembled in ARM-Mode..
 ASRCARM = 

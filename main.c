@@ -29,6 +29,7 @@
 #include <stm32f10x_conf.h>
 #include "common.h"
 #include "tprintf.h"
+#include "stm32_dsp.h"
 
 /* Function Prototypes */
 static void RCC_Configuration(void);
