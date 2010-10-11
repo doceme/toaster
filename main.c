@@ -110,7 +110,8 @@ struct toaster
 {
 	enum thermal_state state;
 	struct thermocouple tc;
-	uint32_t time_elapsed; /* in milliseconds */
+	uint32_t elapsed; /* in milliseconds */
+	uint32_t counter; /* in milliseconds */
 	BitAction led_blue;
 };
 
@@ -124,6 +125,12 @@ static void NVIC_Configuration(void);
 static void SPI_Configuration(void);
 static void TIM_Configuration(void);
 static void main_noreturn(void) NORETURN;
+
+static void toaster_off();
+static void toaster_warmup();
+static void toaster_preheat();
+static void toaster_reflow();
+static void toaster_cooldown();
 
 static struct toaster oven;
 
@@ -429,36 +436,12 @@ void EXTI0_IRQHandler(void)
 	{
 		case OFF:
 		{
-			tprintf(">WARMUP\r\n");
-			oven.state = WARMUP;
-
-			/* Turn on green LED */
-			GPIO_WriteBit(LED_GPIO, LED_PIN_GREEN, Bit_SET);
-
-			/* Enable the RTC second interrupt */
-			RTC_ITConfig(RTC_IT_SEC, ENABLE);
-
-			/* Enable timer counter */
-			TIM_Cmd(TIMER, ENABLE);
+			toaster_warmup();
 		} break;
 
 		default:
 		{
-			tprintf(">OFF\r\n");
-			oven.state = OFF;
-
-			/* Disable timer counter */
-			TIM_Cmd(TIMER, DISABLE);
-
-			/* Disable the RTC second interrupt */
-			RTC_ITConfig(RTC_IT_SEC, DISABLE);
-
-			/* Turn off green LED */
-			GPIO_WriteBit(LED_GPIO, LED_PIN_GREEN, Bit_RESET);
-
-			/* Turn off blue LED */
-			GPIO_WriteBit(LED_GPIO, LED_PIN_BLUE, Bit_RESET);
-			oven.led_blue = 0;
+			toaster_cooldown();
 		} break;
 	}
 }
@@ -515,7 +498,7 @@ void SPI2_IRQHandler(void)
 
 	if (!oven.tc.open)
 	{
-		tprintf("%d,%d\r\n", oven.time_elapsed, oven.tc.temp);
+		tprintf("%d,%d\r\n", oven.elapsed, oven.tc.temp);
 	}
 	else
 	{
@@ -533,11 +516,94 @@ void TIM7_IRQHandler(void)
 	/* Clear the timer update pending bit */
 	TIM_ClearITPendingBit(TIMER, TIM_IT_Update);
 
-	oven.time_elapsed++;
+	oven.elapsed++;
 
 	/* Activate slave select */
 	GPIO_WriteBit(SPI_GPIO, SPI_PIN_NSS, Bit_RESET);
 
 	/* Start temperature read */
 	SPI_I2S_SendData(SPI, 0);
+}
+
+void toaster_off()
+{
+	/* Disable timer counter */
+	TIM_Cmd(TIMER, DISABLE);
+
+	/* Disable the RTC second interrupt */
+	RTC_ITConfig(RTC_IT_SEC, DISABLE);
+
+	/* Turn off green LED */
+	GPIO_WriteBit(LED_GPIO, LED_PIN_GREEN, Bit_RESET);
+
+	/* Turn off blue LED */
+	GPIO_WriteBit(LED_GPIO, LED_PIN_BLUE, Bit_RESET);
+
+	oven.led_blue = 0;
+	oven.state = OFF;
+	tprintf(">OFF\r\n");
+}
+
+void toaster_warmup()
+{
+	if (oven.state == OFF)
+	{
+		/* Turn on green LED */
+		GPIO_WriteBit(LED_GPIO, LED_PIN_GREEN, Bit_SET);
+
+		/* Enable the RTC second interrupt */
+		RTC_ITConfig(RTC_IT_SEC, ENABLE);
+
+		/* Enable timer counter */
+		TIM_Cmd(TIMER, ENABLE);
+
+		oven.counter = 0;
+		oven.state = WARMUP;
+		tprintf(">WARMUP\r\n");
+	}
+	else if (oven.state != WARMUP)
+	{
+		toaster_off();
+		tprintf("Invalid state!\r\n");
+	}
+}
+
+void toaster_preheat()
+{
+	if (oven.state == WARMUP)
+	{
+		oven.counter = 0;
+		oven.state = PREHEAT_RAMPUP;
+		tprintf(">PREHEAT_RAMPUP\r\n");
+	}
+	else if (oven.state != PREHEAT_RAMPUP)
+	{
+		toaster_off();
+		tprintf("Invalid state!\r\n");
+	}
+}
+
+void toaster_reflow()
+{
+	if (oven.state == PREHEAT)
+	{
+		oven.counter = 0;
+		oven.state = REFLOW_RAMPUP;
+		tprintf(">REFLOW_RAMPUP\r\n");
+	}
+	else if (oven.state != REFLOW_RAMPUP)
+	{
+		toaster_off();
+		tprintf("Invalid state!\r\n");
+	}
+}
+
+void toaster_cooldown()
+{
+	if (oven.state != OFF && oven.state != COOLDOWN)
+	{
+		oven.counter = 0;
+		oven.state = COOLDOWN;
+		tprintf(">COOLDOWN\r\n");
+	}
 }
