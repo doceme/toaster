@@ -45,6 +45,7 @@ static BitAction led_rtc = Bit_SET;
 
 static uint16_t tc_temp = 0;
 static uint8_t tc_open = 1;
+static uint32_t elapsed_seconds = 0;
 
 #define USART		USART1
 #define USART_GPIO	GPIOA
@@ -98,6 +99,7 @@ inline void main_noreturn(void)
 	NVIC_Configuration();
 	SPI_Configuration();
 	tprintf("Init Complete.\r\n");
+	tprintf("Time (s),Temp (c)\r\n");
 
 	while (1);
 }
@@ -137,13 +139,21 @@ void GPIO_Configuration(void)
 	GPIO_InitStructure.GPIO_Mode = GPIO_Mode_IN_FLOATING;
 	GPIO_Init(GPIOA, &GPIO_InitStructure);
 
+	/* Deactivate slave select */
+	GPIO_WriteBit(SPI_GPIO, SPI_PIN_NSS, Bit_SET);
+
 	/* Configure SPI_MASTER pins: SCK, MISO and MOSI */
-	GPIO_InitStructure.GPIO_Pin = SPI_PIN_SCK | SPI_PIN_MISO | SPI_PIN_NSS;
+	GPIO_InitStructure.GPIO_Pin = SPI_PIN_SCK | SPI_PIN_MISO;
 	GPIO_InitStructure.GPIO_Mode = GPIO_Mode_AF_PP;
+	GPIO_Init(SPI_GPIO, &GPIO_InitStructure);
+
+	GPIO_InitStructure.GPIO_Pin = SPI_PIN_NSS;
+	GPIO_InitStructure.GPIO_Mode = GPIO_Mode_Out_PP;
 	GPIO_Init(SPI_GPIO, &GPIO_InitStructure);
 
 	/* Configure pinout for UART1 */
 	GPIO_InitStructure.GPIO_Pin = USART_PIN_TX;
+	GPIO_InitStructure.GPIO_Mode = GPIO_Mode_AF_PP;
 	GPIO_Init(USART_GPIO, &GPIO_InitStructure);
 
 	/* Connect Button EXTI Line to Button GPIO Pin */
@@ -288,22 +298,22 @@ void SPI_Configuration(void)
 	SPI_InitTypeDef SPI_InitStructure;
 
 	/* Initialize SPI Master */
-	SPI_InitStructure.SPI_Direction = SPI_Direction_1Line_Rx; //SPI_Direction_2Lines_FullDuplex;
+	SPI_InitStructure.SPI_Direction = SPI_Direction_2Lines_FullDuplex;
 	SPI_InitStructure.SPI_Mode = SPI_Mode_Master;
 	SPI_InitStructure.SPI_DataSize = SPI_DataSize_16b;
 	SPI_InitStructure.SPI_CPOL = SPI_CPOL_Low;
 	SPI_InitStructure.SPI_CPHA = SPI_CPHA_2Edge;
-	SPI_InitStructure.SPI_NSS = SPI_NSS_Hard;
+	SPI_InitStructure.SPI_NSS = SPI_NSS_Soft;
 	SPI_InitStructure.SPI_BaudRatePrescaler = SPI_BaudRatePrescaler_64;
 	SPI_InitStructure.SPI_FirstBit = SPI_FirstBit_MSB;
 	SPI_InitStructure.SPI_CRCPolynomial = 7;
 	SPI_Init(SPI_MASTER, &SPI_InitStructure);
 
-	/* Enable SPI_MASTER NSS output for master mode */
-	SPI_SSOutputCmd(SPI_MASTER, ENABLE);
-
 	/* Enable SPI interrupt */
 	SPI_I2S_ITConfig(SPI_MASTER, SPI_I2S_IT_RXNE, ENABLE);
+
+	/* Enable SPI_MASTER */
+	SPI_Cmd(SPI_MASTER, ENABLE);
 }
 
 /**
@@ -331,11 +341,17 @@ void RTC_IRQHandler(void)
 	{
 		uint32_t counter = RTC_GetCounter();
 
-		/* Start temperature read */
-		//SPI_I2S_SendData(SPI_MASTER, 0);
+		/* Activate slave select */
+		GPIO_WriteBit(SPI_GPIO, SPI_PIN_NSS, Bit_RESET);
 
-		/* Enable SPI_MASTER */
-		SPI_Cmd(SPI_MASTER, ENABLE);
+		/* Start temperature read */
+		SPI_I2S_SendData(SPI_MASTER, 0);
+
+		/* Toggle LED */
+		GPIO_WriteBit(GPIOC, GPIO_Pin_9, led_rtc);
+		led_rtc ^= 1;
+
+		elapsed_seconds++;
 
 		/* Wait until last write operation on RTC registers has finished */
 		RTC_WaitForLastTask();
@@ -360,14 +376,20 @@ void RTC_IRQHandler(void)
   */
 void SPI2_IRQHandler(void)
 {
-	/* Disable SPI_MASTER */
-	SPI_Cmd(SPI_MASTER, DISABLE);
+	uint16_t data;
 
-	uint16_t data = SPI_I2S_ReceiveData(SPI_MASTER);
-	//tc_temp = ((data & MAX6675_MASK_TC_TEMP) >> 3) * 3;
-	//tc_open = ((data & MAX6675_MASK_TC_INPUT) >> 2);
-	GPIO_WriteBit(GPIOC, GPIO_Pin_9, led_rtc);
-	led_rtc ^= 1;
-	//tprintf("%d c (%d)\r\n", tc_temp, tc_open);
-	tprintf("0x%04x\r\n", data);
+	/* Deactivate slave select */
+	GPIO_WriteBit(SPI_GPIO, SPI_PIN_NSS, Bit_SET);
+	data = SPI_I2S_ReceiveData(SPI_MASTER);
+	tc_temp = ((data & MAX6675_MASK_TC_TEMP) >> 3) >> 2;
+	tc_open = ((data & MAX6675_MASK_TC_INPUT) >> 2);
+
+	if (!tc_open)
+	{
+		tprintf("%d,%d\r\n", elapsed_seconds, tc_temp);
+	}
+	else
+	{
+		tprintf("TC open!\r\n");
+	}
 }
