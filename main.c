@@ -78,6 +78,8 @@
 #define SPI_PIN_MISO	GPIO_Pin_14
 #define SPI_PIN_NSS	GPIO_Pin_12
 
+#define DMA		DMA1_Channel4
+
 #define TIMER		TIM7
 #define TIMER_IRQ	TIM7_IRQn
 #define TIMER_APB1	RCC_APB1Periph_TIM7
@@ -122,9 +124,12 @@ static void EXTI_Configuration(void);
 static void RTC_Configuration(void);
 static void NVIC_Configuration(void);
 static void SPI_Configuration(void);
+static void DMA_Configuration(void);
+static void TIM_Configuration(void);
 static void main_noreturn(void) NORETURN;
 
 static struct toaster oven;
+static uint16_t dma;
 
 void assert_failed(uint8_t *function, uint32_t line)
 {
@@ -161,6 +166,8 @@ inline void main_noreturn(void)
 	RTC_Configuration();
 	NVIC_Configuration();
 	SPI_Configuration();
+	DMA_Configuration();
+	TIM_Configuration();
 	tprintf("Init Complete.\r\n");
 	tprintf("Time (s),Temp (c)\r\n");
 
@@ -381,10 +388,65 @@ void SPI_Configuration(void)
 	SPI_Init(SPI, &SPI_InitStructure);
 
 	/* Enable SPI interrupt */
-	SPI_I2S_ITConfig(SPI, SPI_I2S_IT_RXNE, ENABLE);
+	//SPI_I2S_ITConfig(SPI, SPI_I2S_IT_RXNE, ENABLE);
 
 	/* Enable SPI */
 	SPI_Cmd(SPI, ENABLE);
+}
+
+/**
+  * @brief  Configures the DMA controller.
+  * @param  None
+  * @retval None
+  */
+void DMA_Configuration(void)
+{
+	DMA_InitTypeDef DMA_InitStructure;
+
+	/* Configure DMA channel */
+	DMA_DeInit(DMA);
+	DMA_InitStructure.DMA_PeripheralBaseAddr = (uint32_t)&(SPI2->DR);
+	DMA_InitStructure.DMA_MemoryBaseAddr = (uint32_t)&dma;
+	DMA_InitStructure.DMA_DIR = DMA_DIR_PeripheralSRC;
+	DMA_InitStructure.DMA_BufferSize = 1;
+	DMA_InitStructure.DMA_PeripheralInc = DMA_PeripheralInc_Disable;
+	DMA_InitStructure.DMA_MemoryInc = DMA_MemoryInc_Disable;
+	DMA_InitStructure.DMA_PeripheralDataSize = DMA_PeripheralDataSize_HalfWord;
+	DMA_InitStructure.DMA_MemoryDataSize = DMA_MemoryDataSize_HalfWord;
+	DMA_InitStructure.DMA_Mode = DMA_Mode_Circular;
+	DMA_InitStructure.DMA_Priority = DMA_Priority_High;
+	DMA_InitStructure.DMA_M2M = DMA_M2M_Disable;
+	DMA_Init(DMA, &DMA_InitStructure);
+
+	/* Enable DMA channel */
+	DMA_Cmd(DMA, ENABLE);
+}
+
+/**
+  * @brief  Configure the timer controller.
+  * @param  None
+  * @retval None
+  */
+void TIM_Configuration(void)
+{
+	TIM_TimeBaseInitTypeDef  TIM_TimeBaseStructure;
+
+	/* Configure timer */
+	TIM_TimeBaseStructure.TIM_Prescaler = 0;
+	TIM_TimeBaseStructure.TIM_CounterMode = TIM_CounterMode_Up;
+	TIM_TimeBaseStructure.TIM_Period = (SystemCoreClock / 1000 ) - 1;
+	TIM_TimeBaseStructure.TIM_ClockDivision = 0;
+	TIM_TimeBaseStructure.TIM_RepetitionCounter = 2;
+	TIM_TimeBaseInit(TIMER, &TIM_TimeBaseStructure);
+
+	/* Enable SPI interrupt */
+	TIM_ITConfig(TIMER, TIM_IT_Update, ENABLE);
+
+	/* Timer DMA request enable */
+	TIM_DMACmd(TIMER, TIM_DMA_Update, ENABLE);
+
+	/* Enable timer counter */
+	TIM_Cmd(TIMER, ENABLE);
 }
 
 /**
@@ -444,7 +506,7 @@ void RTC_IRQHandler(void)
 		GPIO_WriteBit(SPI_GPIO, SPI_PIN_NSS, Bit_RESET);
 
 		/* Start temperature read */
-		SPI_I2S_SendData(SPI, 0);
+		//SPI_I2S_SendData(SPI, 0);
 
 		/* Toggle blue LED */
 		GPIO_WriteBit(LED_GPIO, LED_PIN_BLUE, oven.led_blue);
@@ -468,6 +530,7 @@ void RTC_IRQHandler(void)
 	}
 }
 
+#if 0
 /**
   * @brief  This function handles SPI interrupt request.
   * @param  None
@@ -491,4 +554,16 @@ void SPI2_IRQHandler(void)
 	{
 		tprintf("Thermocouple is open!\r\n");
 	}
+}
+#endif
+
+/**
+  * @brief  This function handles timer interrupt request.
+  * @param  None
+  * @retval None
+  */
+void TIM7_IRQHandler(void)
+{
+	/* Clear the timer update pending bit */
+	TIM_ClearITPendingBit(TIMER, TIM_IT_Update);
 }
