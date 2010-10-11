@@ -78,8 +78,6 @@
 #define SPI_PIN_MISO	GPIO_Pin_14
 #define SPI_PIN_NSS	GPIO_Pin_12
 
-#define DMA		DMA1_Channel4
-
 #define TIMER		TIM7
 #define TIMER_IRQ	TIM7_IRQn
 #define TIMER_APB1	RCC_APB1Periph_TIM7
@@ -124,12 +122,10 @@ static void EXTI_Configuration(void);
 static void RTC_Configuration(void);
 static void NVIC_Configuration(void);
 static void SPI_Configuration(void);
-static void DMA_Configuration(void);
 static void TIM_Configuration(void);
 static void main_noreturn(void) NORETURN;
 
 static struct toaster oven;
-static uint16_t dma;
 
 void assert_failed(uint8_t *function, uint32_t line)
 {
@@ -166,7 +162,6 @@ inline void main_noreturn(void)
 	RTC_Configuration();
 	NVIC_Configuration();
 	SPI_Configuration();
-	DMA_Configuration();
 	TIM_Configuration();
 	tprintf("Init Complete.\r\n");
 	tprintf("Time (s),Temp (c)\r\n");
@@ -181,7 +176,7 @@ inline void main_noreturn(void)
  */
 void RCC_Configuration(void)
 {
-	/* Enable APB1 peripherals */
+	/* Enable APB1 clocks */
 	RCC_APB1PeriphClockCmd(
 		(LED_APB1 |
 			BTN_APB1 |
@@ -191,6 +186,7 @@ void RCC_Configuration(void)
 			TIMER_APB1),
 		ENABLE);
 
+	/* Enable APB2 clocks */
 	RCC_APB2PeriphClockCmd(
 		(LED_APB2 |
 			BTN_APB2 |
@@ -344,24 +340,28 @@ void NVIC_Configuration(void)
 	/* Configure HCLK clock as SysTick clock source. */
 	SysTick_CLKSourceConfig(SysTick_CLKSource_HCLK);
 
-	//NVIC_InitStructure.NVIC_IRQChannel = RTCAlarm_IRQn;
+	/* Enable RTC interrupt */
 	NVIC_InitStructure.NVIC_IRQChannel = RTC_IRQn;
-	NVIC_InitStructure.NVIC_IRQChannelPreemptionPriority = 0;
+	NVIC_InitStructure.NVIC_IRQChannelPreemptionPriority = 0x2;
 	NVIC_InitStructure.NVIC_IRQChannelSubPriority = 0;
 	NVIC_InitStructure.NVIC_IRQChannelCmd = ENABLE;
 	NVIC_Init(&NVIC_InitStructure);
 
-	/* Enable and set Button EXTI interrupt to the lowest priority */
+	/* Enable button EXTI interrupt */
 	NVIC_InitStructure.NVIC_IRQChannel = BTN_IRQ;
-	NVIC_InitStructure.NVIC_IRQChannelPreemptionPriority = 0x0F;
-	NVIC_InitStructure.NVIC_IRQChannelSubPriority = 0x0F;
+	NVIC_InitStructure.NVIC_IRQChannelPreemptionPriority = 0xf;
 	NVIC_InitStructure.NVIC_IRQChannelCmd = ENABLE;
 	NVIC_Init(&NVIC_InitStructure);
 
-	/* Enable and set SPI interrupt to the lowest priority */
+	/* Enable and set SPI interrupt */
 	NVIC_InitStructure.NVIC_IRQChannel = SPI_IRQ;
-	NVIC_InitStructure.NVIC_IRQChannelPreemptionPriority = 0x01;
-	NVIC_InitStructure.NVIC_IRQChannelSubPriority = 0x01;
+	NVIC_InitStructure.NVIC_IRQChannelPreemptionPriority = 0x0;
+	NVIC_InitStructure.NVIC_IRQChannelCmd = ENABLE;
+	NVIC_Init(&NVIC_InitStructure);
+
+	/* Enable timer interrupt */
+	NVIC_InitStructure.NVIC_IRQChannel = TIMER_IRQ;
+	NVIC_InitStructure.NVIC_IRQChannelPreemptionPriority = 0x1;
 	NVIC_InitStructure.NVIC_IRQChannelCmd = ENABLE;
 	NVIC_Init(&NVIC_InitStructure);
 }
@@ -388,38 +388,10 @@ void SPI_Configuration(void)
 	SPI_Init(SPI, &SPI_InitStructure);
 
 	/* Enable SPI interrupt */
-	//SPI_I2S_ITConfig(SPI, SPI_I2S_IT_RXNE, ENABLE);
+	SPI_I2S_ITConfig(SPI, SPI_I2S_IT_RXNE, ENABLE);
 
 	/* Enable SPI */
 	SPI_Cmd(SPI, ENABLE);
-}
-
-/**
-  * @brief  Configures the DMA controller.
-  * @param  None
-  * @retval None
-  */
-void DMA_Configuration(void)
-{
-	DMA_InitTypeDef DMA_InitStructure;
-
-	/* Configure DMA channel */
-	DMA_DeInit(DMA);
-	DMA_InitStructure.DMA_PeripheralBaseAddr = (uint32_t)&(SPI2->DR);
-	DMA_InitStructure.DMA_MemoryBaseAddr = (uint32_t)&dma;
-	DMA_InitStructure.DMA_DIR = DMA_DIR_PeripheralSRC;
-	DMA_InitStructure.DMA_BufferSize = 1;
-	DMA_InitStructure.DMA_PeripheralInc = DMA_PeripheralInc_Disable;
-	DMA_InitStructure.DMA_MemoryInc = DMA_MemoryInc_Disable;
-	DMA_InitStructure.DMA_PeripheralDataSize = DMA_PeripheralDataSize_HalfWord;
-	DMA_InitStructure.DMA_MemoryDataSize = DMA_MemoryDataSize_HalfWord;
-	DMA_InitStructure.DMA_Mode = DMA_Mode_Circular;
-	DMA_InitStructure.DMA_Priority = DMA_Priority_High;
-	DMA_InitStructure.DMA_M2M = DMA_M2M_Disable;
-	DMA_Init(DMA, &DMA_InitStructure);
-
-	/* Enable DMA channel */
-	DMA_Cmd(DMA, ENABLE);
 }
 
 /**
@@ -439,14 +411,8 @@ void TIM_Configuration(void)
 	TIM_TimeBaseStructure.TIM_RepetitionCounter = 2;
 	TIM_TimeBaseInit(TIMER, &TIM_TimeBaseStructure);
 
-	/* Enable SPI interrupt */
+	/* Enable timer interrupt */
 	TIM_ITConfig(TIMER, TIM_IT_Update, ENABLE);
-
-	/* Timer DMA request enable */
-	TIM_DMACmd(TIMER, TIM_DMA_Update, ENABLE);
-
-	/* Enable timer counter */
-	TIM_Cmd(TIMER, ENABLE);
 }
 
 /**
@@ -471,6 +437,9 @@ void EXTI0_IRQHandler(void)
 
 			/* Enable the RTC second interrupt */
 			RTC_ITConfig(RTC_IT_SEC, ENABLE);
+
+			/* Enable timer counter */
+			TIM_Cmd(TIMER, ENABLE);
 		} break;
 
 		default:
@@ -478,15 +447,18 @@ void EXTI0_IRQHandler(void)
 			tprintf(">OFF\r\n");
 			oven.state = OFF;
 
+			/* Disable timer counter */
+			TIM_Cmd(TIMER, DISABLE);
+
+			/* Disable the RTC second interrupt */
+			RTC_ITConfig(RTC_IT_SEC, DISABLE);
+
 			/* Turn off green LED */
 			GPIO_WriteBit(LED_GPIO, LED_PIN_GREEN, Bit_RESET);
 
 			/* Turn off blue LED */
 			GPIO_WriteBit(LED_GPIO, LED_PIN_BLUE, Bit_RESET);
 			oven.led_blue = 0;
-
-			/* Disable the RTC second interrupt */
-			RTC_ITConfig(RTC_IT_SEC, DISABLE);
 		} break;
 	}
 }
@@ -502,17 +474,9 @@ void RTC_IRQHandler(void)
 	{
 		uint32_t counter = RTC_GetCounter();
 
-		/* Activate slave select */
-		GPIO_WriteBit(SPI_GPIO, SPI_PIN_NSS, Bit_RESET);
-
-		/* Start temperature read */
-		//SPI_I2S_SendData(SPI, 0);
-
 		/* Toggle blue LED */
 		GPIO_WriteBit(LED_GPIO, LED_PIN_BLUE, oven.led_blue);
 		oven.led_blue ^= 1;
-
-		oven.time_elapsed+=1000;
 
 		/* Wait until last write operation on RTC registers has finished */
 		RTC_WaitForLastTask();
@@ -530,7 +494,6 @@ void RTC_IRQHandler(void)
 	}
 }
 
-#if 0
 /**
   * @brief  This function handles SPI interrupt request.
   * @param  None
@@ -542,7 +505,11 @@ void SPI2_IRQHandler(void)
 
 	/* Deactivate slave select */
 	GPIO_WriteBit(SPI_GPIO, SPI_PIN_NSS, Bit_SET);
+
+	/* Get SPI data */
 	data = SPI_I2S_ReceiveData(SPI);
+
+	/* Set thermocouple data */
 	oven.tc.temp = ((data & MAX6675_MASK_TC_TEMP) >> 3) >> 2;
 	oven.tc.open = ((data & MAX6675_MASK_TC_INPUT) >> 2);
 
@@ -555,7 +522,6 @@ void SPI2_IRQHandler(void)
 		tprintf("Thermocouple is open!\r\n");
 	}
 }
-#endif
 
 /**
   * @brief  This function handles timer interrupt request.
@@ -566,4 +532,12 @@ void TIM7_IRQHandler(void)
 {
 	/* Clear the timer update pending bit */
 	TIM_ClearITPendingBit(TIMER, TIM_IT_Update);
+
+	oven.time_elapsed++;
+
+	/* Activate slave select */
+	GPIO_WriteBit(SPI_GPIO, SPI_PIN_NSS, Bit_RESET);
+
+	/* Start temperature read */
+	SPI_I2S_SendData(SPI, 0);
 }
