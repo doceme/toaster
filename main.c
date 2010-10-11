@@ -31,6 +31,89 @@
 #include "tprintf.h"
 #include "stm32_dsp.h"
 
+#define LED_GPIO	GPIOC
+#define LED_APB1	0
+#define LED_APB2	RCC_APB2Periph_GPIOC
+#define LED_PIN_BLUE	GPIO_Pin_8
+#define LED_PIN_GREEN	GPIO_Pin_9
+
+#define BTN_GPIO	GPIOA
+#define BTN_IRQ	EXTI0_IRQn
+#define BTN_APB1	0
+#define BTN_APB2	RCC_APB2Periph_GPIOA
+#define BTN_PIN	GPIO_Pin_0
+#define BTN_PORT_SRC	GPIO_PortSourceGPIOA
+#define BTN_PIN_SRC	GPIO_PinSource0
+#define BTN_EXTI_LINE	EXTI_Line0
+#define BTN_EXTI_MODE	EXTI_Mode_Interrupt
+#define BTN_EXTI_TRG	EXTI_Trigger_Falling
+
+#define RTC_APB1	(RCC_APB1Periph_PWR | RCC_APB1Periph_BKP)
+#define RTC_APB2	0
+
+#define USART		USART1
+#define USART_APB1	0
+#define USART_APB2	RCC_APB2Periph_GPIOA | RCC_APB2Periph_USART1
+#define USART_GPIO	GPIOA
+#define USART_PIN_TX	GPIO_Pin_9
+#define USART_BAUDRATE	115200
+#define USART_WORD_LEN	USART_WordLength_8b
+#define USART_STOP_BITS	USART_StopBits_1
+#define USART_PARITY	USART_Parity_No
+#define USART_HW_FLOW	USART_HardwareFlowControl_None
+#define USART_MODE	USART_Mode_Tx
+
+#define SPI		SPI2
+#define SPI_IRQ		SPI2_IRQn
+#define SPI_APB1	RCC_APB1Periph_SPI2
+#define SPI_APB2	RCC_APB2Periph_AFIO | RCC_APB2Periph_GPIOB
+#define SPI_DIRECTION	SPI_Direction_2Lines_FullDuplex
+#define SPI_MODE	SPI_Mode_Master
+#define SPI_DATA_SIZE	SPI_DataSize_16b
+#define SPI_CLK_POL	SPI_CPOL_Low
+#define SPI_CLK_PHASE	SPI_CPHA_2Edge
+#define SPI_SLAVE_MODE	SPI_NSS_Soft
+#define SPI_GPIO	GPIOB
+#define SPI_PIN_SCK	GPIO_Pin_13
+#define SPI_PIN_MISO	GPIO_Pin_14
+#define SPI_PIN_NSS	GPIO_Pin_12
+
+#define TIMER		TIM7
+#define TIMER_IRQ	TIM7_IRQn
+#define TIMER_APB1	RCC_APB1Periph_TIM7
+#define TIMER_APB2	0
+
+#define MAX6675_MASK_STATE	0x1
+#define MAX6675_MASK_DEVICE_ID	0x2
+#define MAX6675_MASK_TC_INPUT	0x4
+#define MAX6675_MASK_TC_TEMP	0x7ff8
+#define MAX6675_MASK_DUMMY	0x8000
+
+enum thermal_state
+{
+	OFF,
+	WARMUP,
+	PREHEAT_RAMPUP,
+	PREHEAT,
+	REFLOW_RAMPUP,
+	REFLOW,
+	COOLDOWN
+};
+
+struct thermocouple
+{
+	uint16_t temp;
+	uint8_t open;
+};
+
+struct toaster
+{
+	enum thermal_state state;
+	struct thermocouple tc;
+	uint32_t time_elapsed; /* in milliseconds */
+	BitAction led_blue;
+};
+
 /* Function Prototypes */
 static void RCC_Configuration(void);
 static void GPIO_Configuration(void);
@@ -41,28 +124,7 @@ static void NVIC_Configuration(void);
 static void SPI_Configuration(void);
 static void main_noreturn(void) NORETURN;
 
-static BitAction led_user = Bit_SET;
-static BitAction led_rtc = Bit_SET;
-
-static uint16_t tc_temp = 0;
-static uint8_t tc_open = 1;
-static uint32_t elapsed_seconds = 0;
-
-#define USART		USART1
-#define USART_GPIO	GPIOA
-#define USART_PIN_TX	GPIO_Pin_9
-
-#define SPI_MASTER	SPI2
-#define SPI_GPIO	GPIOB
-#define SPI_PIN_SCK	GPIO_Pin_13
-#define SPI_PIN_MISO	GPIO_Pin_14
-#define SPI_PIN_NSS	GPIO_Pin_12
-
-#define MAX6675_MASK_STATE	0x1
-#define MAX6675_MASK_DEVICE_ID	0x2
-#define MAX6675_MASK_TC_INPUT	0x4
-#define MAX6675_MASK_TC_TEMP	0x7ff8
-#define MAX6675_MASK_DUMMY	0x8000
+static struct toaster oven;
 
 void assert_failed(uint8_t *function, uint32_t line)
 {
@@ -112,11 +174,24 @@ inline void main_noreturn(void)
  */
 void RCC_Configuration(void)
 {
-	/* Enable PWR clock */
-	RCC_APB1PeriphClockCmd(RCC_APB1Periph_PWR | RCC_APB1Periph_BKP | RCC_APB1Periph_SPI2, ENABLE);
+	/* Enable APB1 peripherals */
+	RCC_APB1PeriphClockCmd(
+		(LED_APB1 |
+			BTN_APB1 |
+			RTC_APB1 |
+			USART_APB1 |
+			SPI_APB1 |
+			TIMER_APB1),
+		ENABLE);
 
-	/* Enable GPIO clocks */
-	RCC_APB2PeriphClockCmd(RCC_APB2Periph_AFIO | RCC_APB2Periph_GPIOA | RCC_APB2Periph_GPIOB | RCC_APB2Periph_GPIOC | RCC_APB2Periph_USART1, ENABLE);
+	RCC_APB2PeriphClockCmd(
+		(LED_APB2 |
+			BTN_APB2 |
+			RTC_APB2 |
+			USART_APB2 |
+			SPI_APB2 |
+			TIMER_APB2),
+		ENABLE);
 }
 
 /**
@@ -128,37 +203,34 @@ void GPIO_Configuration(void)
 {
 	GPIO_InitTypeDef GPIO_InitStructure;
 
-	/* Configure PC5 (ADC Channel15) as analog input */
-	GPIO_WriteBit(GPIOC, GPIO_Pin_8 | GPIO_Pin_9, Bit_SET);
-	GPIO_InitStructure.GPIO_Pin = GPIO_Pin_8 | GPIO_Pin_9;
+	/* Configure LED pins */
+	GPIO_InitStructure.GPIO_Pin = LED_PIN_BLUE | LED_PIN_GREEN;
 	GPIO_InitStructure.GPIO_Mode = GPIO_Mode_Out_PP;
 	GPIO_InitStructure.GPIO_Speed = GPIO_Speed_10MHz;
-	GPIO_Init(GPIOC, &GPIO_InitStructure);
+	GPIO_Init(LED_GPIO, &GPIO_InitStructure);
 
-	/* Configure button input floating */
-	GPIO_InitStructure.GPIO_Pin = GPIO_Pin_0;
+	/* Configure button pins */
+	GPIO_InitStructure.GPIO_Pin = BTN_PIN;
 	GPIO_InitStructure.GPIO_Mode = GPIO_Mode_IN_FLOATING;
-	GPIO_Init(GPIOA, &GPIO_InitStructure);
+	GPIO_Init(BTN_GPIO, &GPIO_InitStructure);
 
+	/* Configure SPI pins */
 	/* Deactivate slave select */
 	GPIO_WriteBit(SPI_GPIO, SPI_PIN_NSS, Bit_SET);
-
-	/* Configure SPI_MASTER pins: SCK, MISO and MOSI */
 	GPIO_InitStructure.GPIO_Pin = SPI_PIN_SCK | SPI_PIN_MISO;
 	GPIO_InitStructure.GPIO_Mode = GPIO_Mode_AF_PP;
 	GPIO_Init(SPI_GPIO, &GPIO_InitStructure);
-
 	GPIO_InitStructure.GPIO_Pin = SPI_PIN_NSS;
 	GPIO_InitStructure.GPIO_Mode = GPIO_Mode_Out_PP;
 	GPIO_Init(SPI_GPIO, &GPIO_InitStructure);
 
-	/* Configure pinout for UART1 */
+	/* Configure USART pins */
 	GPIO_InitStructure.GPIO_Pin = USART_PIN_TX;
 	GPIO_InitStructure.GPIO_Mode = GPIO_Mode_AF_PP;
 	GPIO_Init(USART_GPIO, &GPIO_InitStructure);
 
-	/* Connect Button EXTI Line to Button GPIO Pin */
-	GPIO_EXTILineConfig(GPIO_PortSourceGPIOA, GPIO_PinSource0);
+	/* Connect button EXTI Line to button GPIO pin */
+	GPIO_EXTILineConfig(BTN_PORT_SRC, BTN_PIN_SRC);
 }
 
 /**
@@ -171,12 +243,12 @@ void USART_Configuration(void)
 	USART_InitTypeDef USART_InitStructure;
 
 	/* Configure the USART */
-	USART_InitStructure.USART_BaudRate = 115200;
-	USART_InitStructure.USART_WordLength = USART_WordLength_8b;
-	USART_InitStructure.USART_StopBits = USART_StopBits_1;
-	USART_InitStructure.USART_Parity = USART_Parity_No;
-	USART_InitStructure.USART_HardwareFlowControl = USART_HardwareFlowControl_None;
-	USART_InitStructure.USART_Mode = USART_Mode_Tx;
+	USART_InitStructure.USART_BaudRate = USART_BAUDRATE;
+	USART_InitStructure.USART_WordLength = USART_WORD_LEN;
+	USART_InitStructure.USART_StopBits = USART_STOP_BITS;
+	USART_InitStructure.USART_Parity = USART_PARITY;
+	USART_InitStructure.USART_HardwareFlowControl = USART_HW_FLOW;
+	USART_InitStructure.USART_Mode = USART_MODE;
 
 	USART_Init(USART, &USART_InitStructure);
 
@@ -193,10 +265,11 @@ void EXTI_Configuration(void)
 {
 	EXTI_InitTypeDef EXTI_InitStructure;
 
-	EXTI_ClearITPendingBit(EXTI_Line0);
-	EXTI_InitStructure.EXTI_Line = EXTI_Line0;
-	EXTI_InitStructure.EXTI_Mode = EXTI_Mode_Interrupt;
-	EXTI_InitStructure.EXTI_Trigger = EXTI_Trigger_Falling;
+	/* Configure the external interrupt */
+	EXTI_ClearITPendingBit(BTN_EXTI_LINE);
+	EXTI_InitStructure.EXTI_Line = BTN_EXTI_LINE;
+	EXTI_InitStructure.EXTI_Mode = BTN_EXTI_MODE;
+	EXTI_InitStructure.EXTI_Trigger = BTN_EXTI_TRG;
 	EXTI_InitStructure.EXTI_LineCmd = ENABLE;
 	EXTI_Init(&EXTI_InitStructure);
 }
@@ -233,7 +306,7 @@ void RTC_Configuration(void)
 	/* Wait for RTC APB registers synchronisation */
 	RTC_WaitForSynchro();
 
-	/* Set the RTC time base to 1min */
+	/* Set the RTC time base to 1 second */
 	RTC_SetPrescaler(32767);
 
 	/* Wait until last write operation on RTC registers has finished */
@@ -241,9 +314,6 @@ void RTC_Configuration(void)
 
 	/* Enable the RTC Alarm interrupt */
 	//RTC_ITConfig(RTC_IT_ALR, ENABLE);
-
-	/* Enable the RTC second interrupt */
-	RTC_ITConfig(RTC_IT_SEC, ENABLE);
 
 	/* Wait until last write operation on RTC registers has finished */
 	RTC_WaitForLastTask();
@@ -275,14 +345,14 @@ void NVIC_Configuration(void)
 	NVIC_Init(&NVIC_InitStructure);
 
 	/* Enable and set Button EXTI interrupt to the lowest priority */
-	NVIC_InitStructure.NVIC_IRQChannel = EXTI0_IRQn;
+	NVIC_InitStructure.NVIC_IRQChannel = BTN_IRQ;
 	NVIC_InitStructure.NVIC_IRQChannelPreemptionPriority = 0x0F;
 	NVIC_InitStructure.NVIC_IRQChannelSubPriority = 0x0F;
 	NVIC_InitStructure.NVIC_IRQChannelCmd = ENABLE;
 	NVIC_Init(&NVIC_InitStructure);
 
 	/* Enable and set SPI interrupt to the lowest priority */
-	NVIC_InitStructure.NVIC_IRQChannel = SPI2_IRQn;
+	NVIC_InitStructure.NVIC_IRQChannel = SPI_IRQ;
 	NVIC_InitStructure.NVIC_IRQChannelPreemptionPriority = 0x01;
 	NVIC_InitStructure.NVIC_IRQChannelSubPriority = 0x01;
 	NVIC_InitStructure.NVIC_IRQChannelCmd = ENABLE;
@@ -298,23 +368,23 @@ void SPI_Configuration(void)
 {
 	SPI_InitTypeDef SPI_InitStructure;
 
-	/* Initialize SPI Master */
-	SPI_InitStructure.SPI_Direction = SPI_Direction_2Lines_FullDuplex;
-	SPI_InitStructure.SPI_Mode = SPI_Mode_Master;
-	SPI_InitStructure.SPI_DataSize = SPI_DataSize_16b;
-	SPI_InitStructure.SPI_CPOL = SPI_CPOL_Low;
-	SPI_InitStructure.SPI_CPHA = SPI_CPHA_2Edge;
-	SPI_InitStructure.SPI_NSS = SPI_NSS_Soft;
+	/* Configure SPI controller */
+	SPI_InitStructure.SPI_Direction = SPI_DIRECTION;
+	SPI_InitStructure.SPI_Mode = SPI_MODE;
+	SPI_InitStructure.SPI_DataSize = SPI_DATA_SIZE;
+	SPI_InitStructure.SPI_CPOL = SPI_CLK_POL;
+	SPI_InitStructure.SPI_CPHA = SPI_CLK_PHASE;
+	SPI_InitStructure.SPI_NSS = SPI_SLAVE_MODE;
 	SPI_InitStructure.SPI_BaudRatePrescaler = SPI_BaudRatePrescaler_64;
 	SPI_InitStructure.SPI_FirstBit = SPI_FirstBit_MSB;
 	SPI_InitStructure.SPI_CRCPolynomial = 7;
-	SPI_Init(SPI_MASTER, &SPI_InitStructure);
+	SPI_Init(SPI, &SPI_InitStructure);
 
 	/* Enable SPI interrupt */
-	SPI_I2S_ITConfig(SPI_MASTER, SPI_I2S_IT_RXNE, ENABLE);
+	SPI_I2S_ITConfig(SPI, SPI_I2S_IT_RXNE, ENABLE);
 
-	/* Enable SPI_MASTER */
-	SPI_Cmd(SPI_MASTER, ENABLE);
+	/* Enable SPI */
+	SPI_Cmd(SPI, ENABLE);
 }
 
 /**
@@ -327,8 +397,36 @@ void EXTI0_IRQHandler(void)
 	/* Clear the Key Button EXTI line pending bit */
 	EXTI_ClearITPendingBit(EXTI_Line0);
 
-	GPIO_WriteBit(GPIOC, GPIO_Pin_8, led_user);
-	led_user ^= 1;
+	switch (oven.state)
+	{
+		case OFF:
+		{
+			tprintf(">WARMUP\r\n");
+			oven.state = WARMUP;
+
+			/* Turn on green LED */
+			GPIO_WriteBit(LED_GPIO, LED_PIN_GREEN, Bit_SET);
+
+			/* Enable the RTC second interrupt */
+			RTC_ITConfig(RTC_IT_SEC, ENABLE);
+		} break;
+
+		default:
+		{
+			tprintf(">OFF\r\n");
+			oven.state = OFF;
+
+			/* Turn off green LED */
+			GPIO_WriteBit(LED_GPIO, LED_PIN_GREEN, Bit_RESET);
+
+			/* Turn off blue LED */
+			GPIO_WriteBit(LED_GPIO, LED_PIN_BLUE, Bit_RESET);
+			oven.led_blue = 0;
+
+			/* Disable the RTC second interrupt */
+			RTC_ITConfig(RTC_IT_SEC, DISABLE);
+		} break;
+	}
 }
 
 /**
@@ -346,13 +444,13 @@ void RTC_IRQHandler(void)
 		GPIO_WriteBit(SPI_GPIO, SPI_PIN_NSS, Bit_RESET);
 
 		/* Start temperature read */
-		SPI_I2S_SendData(SPI_MASTER, 0);
+		SPI_I2S_SendData(SPI, 0);
 
-		/* Toggle LED */
-		GPIO_WriteBit(GPIOC, GPIO_Pin_9, led_rtc);
-		led_rtc ^= 1;
+		/* Toggle blue LED */
+		GPIO_WriteBit(LED_GPIO, LED_PIN_BLUE, oven.led_blue);
+		oven.led_blue ^= 1;
 
-		elapsed_seconds++;
+		oven.time_elapsed+=1000;
 
 		/* Wait until last write operation on RTC registers has finished */
 		RTC_WaitForLastTask();
@@ -381,16 +479,16 @@ void SPI2_IRQHandler(void)
 
 	/* Deactivate slave select */
 	GPIO_WriteBit(SPI_GPIO, SPI_PIN_NSS, Bit_SET);
-	data = SPI_I2S_ReceiveData(SPI_MASTER);
-	tc_temp = ((data & MAX6675_MASK_TC_TEMP) >> 3) >> 2;
-	tc_open = ((data & MAX6675_MASK_TC_INPUT) >> 2);
+	data = SPI_I2S_ReceiveData(SPI);
+	oven.tc.temp = ((data & MAX6675_MASK_TC_TEMP) >> 3) >> 2;
+	oven.tc.open = ((data & MAX6675_MASK_TC_INPUT) >> 2);
 
-	if (!tc_open)
+	if (!oven.tc.open)
 	{
-		tprintf("%d,%d\r\n", elapsed_seconds, tc_temp);
+		tprintf("%d,%d\r\n", oven.time_elapsed, oven.tc.temp);
 	}
 	else
 	{
-		tprintf("TC open!\r\n");
+		tprintf("Thermocouple is open!\r\n");
 	}
 }
