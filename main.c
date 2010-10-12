@@ -38,7 +38,7 @@
 #define LED_PIN_GREEN	GPIO_Pin_9
 
 #define BTN_GPIO	GPIOA
-#define BTN_IRQ	EXTI0_IRQn
+#define BTN_IRQ		EXTI0_IRQn
 #define BTN_APB1	0
 #define BTN_APB2	RCC_APB2Periph_GPIOA
 #define BTN_PIN	GPIO_Pin_0
