@@ -89,6 +89,8 @@
 #define MAX6675_MASK_TC_TEMP	0x7ff8
 #define MAX6675_MASK_DUMMY	0x8000
 
+#define DEBOUNCE_DELAY		40
+
 /* All time data is in milliseconds unless otherwise stated */
 /* All temperature data is in degrees Celcius unless otherwise stated */
 /* All rate data is in degrees Celcius per second unless otherwise stated */
@@ -156,6 +158,7 @@ static void toaster_preheat();
 static void toaster_reflow();
 static void toaster_cooldown();
 
+static uint8_t debounce;
 static struct toaster oven;
 static struct limits profile =
 {
@@ -166,7 +169,7 @@ static struct limits profile =
 	.reflow_temp_min = 183,
 	.reflow_temp_max = 235,
 	.reflow_time_min = 10 * 1000,
-	.reflow_time_max = 20 * 1000,
+	.reflow_time_max = 60 * 1000,
 	.preheat_rampup_rate = 2,
 	.preheat_rate = 0.5,
 	.reflow_rampup_rate = 2.5,
@@ -474,17 +477,12 @@ void EXTI0_IRQHandler(void)
 	/* Clear the Key Button EXTI line pending bit */
 	EXTI_ClearITPendingBit(EXTI_Line0);
 
-	switch (oven.state)
+	if (!debounce)
 	{
-		case OFF:
-		{
-			toaster_preheat();
-		} break;
+		debounce = DEBOUNCE_DELAY;
 
-		default:
-		{
-			toaster_cooldown();
-		} break;
+		/* Enable timer counter */
+		TIM_Cmd(TIMER, ENABLE);
 	}
 }
 
@@ -556,44 +554,77 @@ void TIM7_IRQHandler(void)
 	/* Clear the timer update pending bit */
 	TIM_ClearITPendingBit(TIMER, TIM_IT_Update);
 
-	oven.elapsed++;
-	oven.counter++;
-
-	/* Activate slave select */
-	GPIO_WriteBit(SPI_GPIO, SPI_PIN_NSS, Bit_RESET);
-
-	/* Start temperature read */
-	SPI_I2S_SendData(SPI, 0);
-
-	if (oven.elapsed % 3000 == 0)
+	if (!debounce)
 	{
-		tprintf("%d,%d\r\n", oven.elapsed, oven.tc.temp);
+		oven.elapsed++;
+		oven.counter++;
+
+		/* Activate slave select */
+		GPIO_WriteBit(SPI_GPIO, SPI_PIN_NSS, Bit_RESET);
+
+		/* Start temperature read */
+		SPI_I2S_SendData(SPI, 0);
+
+		if (oven.elapsed % 3000 == 0)
+		{
+			tprintf("%d,%d\r\n", oven.elapsed, oven.tc.temp);
+		}
+
+		switch (oven.state)
+		{
+			case OFF:
+				break;
+			case PREHEAT_RAMPUP:
+			case PREHEAT:
+			{
+				toaster_preheat();
+			} break;
+
+			case REFLOW_RAMPUP:
+			case REFLOW:
+			{
+				toaster_reflow();
+			} break;
+
+			case COOLDOWN:
+			{
+				toaster_cooldown();
+			} break;
+
+			default:
+			{
+				toaster_off();
+				tprintf("Invalid state! %d\r\n", oven.state);
+			} break;
+		}
 	}
-
-	switch (oven.state)
+	else
 	{
-		case PREHEAT_RAMPUP:
-		case PREHEAT:
-		{
-			toaster_preheat();
-		} break;
+		debounce--;
 
-		case REFLOW_RAMPUP:
-		case REFLOW:
+		if (!debounce)
 		{
-			toaster_reflow();
-		} break;
+			if (GPIO_ReadInputDataBit(BTN_GPIO, BTN_PIN) == RESET)
+			{
+				switch (oven.state)
+				{
+					case OFF:
+					{
+						toaster_preheat();
+					} break;
 
-		case COOLDOWN:
-		{
-			toaster_cooldown();
-		} break;
-
-		default:
-		{
-			toaster_off();
-			tprintf("Invalid state!\r\n");
-		} break;
+					default:
+					{
+						toaster_cooldown();
+					} break;
+				}
+			}
+			else /* False positive */
+			{
+				/* Disable timer counter */
+				TIM_Cmd(TIMER, DISABLE);
+			}
+		}
 	}
 }
 
@@ -686,6 +717,10 @@ void toaster_preheat()
 		{
 			toaster_goto(PREHEAT);
 		}
+		else if (oven.counter >= profile.preheat_time_max)
+		{
+			toaster_reflow();
+		}
 	}
 	else if (oven.state == PREHEAT)
 	{
@@ -703,7 +738,7 @@ void toaster_preheat()
 
 void toaster_reflow()
 {
-	if (oven.state == PREHEAT)
+	if ((oven.state == PREHEAT) || (oven.state == PREHEAT_RAMPUP))
 	{
 		toaster_goto(REFLOW_RAMPUP);
 	}
@@ -712,6 +747,10 @@ void toaster_reflow()
 		if (oven.tc.temp >= profile.reflow_temp_min)
 		{
 			toaster_goto(REFLOW);
+		}
+		else if (oven.counter >= profile.reflow_time_max)
+		{
+			toaster_cooldown();
 		}
 	}
 	else if (oven.state != REFLOW)
