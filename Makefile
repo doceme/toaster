@@ -81,6 +81,7 @@ RTOSINCDIR = $(RTOSSRCDIR)/include
 SRC =  main.c
 
 ## COMMON:
+SRC +=  $(COMMONDIR)/fault.c
 SRC +=  $(COMMONDIR)/tprintf.c
 
 ## CMSIS for STM32
