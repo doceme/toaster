@@ -83,6 +83,13 @@
 #define TIMER_APB1	RCC_APB1Periph_TIM7
 #define TIMER_APB2	0
 
+#define OVN_PWM_TIM		TIM3
+#define OVN_PWM_APB1	RCC_APB1Periph_TIM3
+#define OVN_PWM_APB2	RCC_APB2Periph_GPIOA
+#define OVN_PWM_GPIO	GPIOA
+#define OVN_PWM_PIN		GPIO_Pin_6
+#define OVN_PWM_MS		((SystemCoreClock / 100000) - 1)
+
 #define MAX6675_MASK_STATE	0x1
 #define MAX6675_MASK_DEVICE_ID	0x2
 #define MAX6675_MASK_TC_INPUT	0x4
@@ -157,6 +164,8 @@ static void toaster_off();
 static void toaster_preheat();
 static void toaster_reflow();
 static void toaster_cooldown();
+
+static void ovn_pwm_set(int period_ms,int duty_percent);
 
 static uint8_t debounce;
 static struct toaster oven;
@@ -235,7 +244,8 @@ void RCC_Configuration(void)
 			RTC_APB1 |
 			USART_APB1 |
 			SPI_APB1 |
-			TIMER_APB1),
+			TIMER_APB1 |
+			OVN_PWM_APB1),
 		ENABLE);
 
 	/* Enable APB2 clocks */
@@ -245,7 +255,8 @@ void RCC_Configuration(void)
 			RTC_APB2 |
 			USART_APB2 |
 			SPI_APB2 |
-			TIMER_APB2),
+			TIMER_APB2 |
+			OVN_PWM_APB1),
 		ENABLE);
 }
 
@@ -278,6 +289,12 @@ void GPIO_Configuration(void)
 	GPIO_InitStructure.GPIO_Pin = SPI_PIN_NSS;
 	GPIO_InitStructure.GPIO_Mode = GPIO_Mode_Out_PP;
 	GPIO_Init(SPI_GPIO, &GPIO_InitStructure);
+
+	/* Configure the main PWM to control the oven */
+	GPIO_InitStructure.GPIO_Pin = OVN_PWM_PIN;
+	GPIO_InitStructure.GPIO_Speed = GPIO_Speed_50MHz;
+	GPIO_InitStructure.GPIO_Mode = GPIO_Mode_AF_PP;
+	GPIO_Init(OVN_PWM_GPIO, &GPIO_InitStructure);
 
 	/* Configure USART pins */
 	GPIO_InitStructure.GPIO_Pin = USART_PIN_TX;
@@ -463,8 +480,16 @@ void TIM_Configuration(void)
 	TIM_TimeBaseStructure.TIM_RepetitionCounter = 2;
 	TIM_TimeBaseInit(TIMER, &TIM_TimeBaseStructure);
 
+	/* Configure PWM TIM for oven control */
+	ovn_pwm_set(0, 0);  // Default to off
+
 	/* Enable timer interrupt */
 	TIM_ITConfig(TIMER, TIM_IT_Update, ENABLE);
+
+	/* Enable oven pwm timer */
+	TIM_OC1PreloadConfig(OVN_PWM_TIM, TIM_OCPreload_Enable);
+	TIM_ARRPreloadConfig(OVN_PWM_TIM, ENABLE);
+	TIM_Cmd(OVN_PWM_TIM, ENABLE);
 }
 
 /**
@@ -688,6 +713,9 @@ void toaster_off()
 	GPIO_WriteBit(LED_GPIO, LED_PIN_BLUE, Bit_RESET);
 	oven.led_blue = 0;
 
+	/* Turn off the oven */
+	ovn_pwm_set(0, 0);
+
 	toaster_goto(OFF);
 }
 
@@ -784,4 +812,25 @@ void toaster_cooldown()
 			}
 		}
 	}
+}
+
+void ovn_pwm_set(int period_ms,int duty_percent)
+{
+	TIM_TimeBaseInitTypeDef  TIM_TimeBaseStructure;
+	TIM_OCInitTypeDef TIM_OCInitStructure;
+	tprintf("Setting oven PWM: Period=%dms, Duty=%d%%\n", period_ms, duty_percent);
+
+	/* Set Period of waveform */
+	TIM_TimeBaseStructure.TIM_Prescaler = OVN_PWM_MS * period_ms;
+	TIM_TimeBaseStructure.TIM_Period = 100;
+	TIM_TimeBaseStructure.TIM_ClockDivision = 0;
+	TIM_TimeBaseStructure.TIM_CounterMode = TIM_CounterMode_Up;
+	TIM_TimeBaseInit(OVN_PWM_TIM, &TIM_TimeBaseStructure);
+
+	/* Set Duty Cycle */
+	TIM_OCInitStructure.TIM_OCMode = TIM_OCMode_PWM1;
+	TIM_OCInitStructure.TIM_OutputState = TIM_OutputState_Enable;
+	TIM_OCInitStructure.TIM_Pulse = duty_percent;
+	TIM_OCInitStructure.TIM_OCPolarity = TIM_OCPolarity_High;
+	TIM_OC1Init(OVN_PWM_TIM, &TIM_OCInitStructure);
 }
