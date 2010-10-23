@@ -1,7 +1,6 @@
 /**
  ******************************************************************************
- *
- * @file       main.c
+ * * @file       main.c
  * @author     Stephen Caudle Copyright (C) 2010
  * @author     Michael Spradling Copyright (C) 2010
  * @brief      Main toaster application
@@ -27,9 +26,9 @@
 /* Includes */
 #include <stm32f10x.h>
 #include <stm32f10x_conf.h>
+#include <stdlib.h>
 #include "common.h"
 #include "tprintf.h"
-#include "stm32_dsp.h"
 
 #define LED_GPIO	GPIOC
 #define LED_APB1	0
@@ -41,7 +40,7 @@
 #define BTN_IRQ		EXTI0_IRQn
 #define BTN_APB1	0
 #define BTN_APB2	RCC_APB2Periph_GPIOA
-#define BTN_PIN	GPIO_Pin_0
+#define BTN_PIN		GPIO_Pin_0
 #define BTN_PORT_SRC	GPIO_PortSourceGPIOA
 #define BTN_PIN_SRC	GPIO_PinSource0
 #define BTN_EXTI_LINE	EXTI_Line0
@@ -83,12 +82,12 @@
 #define TIMER_APB1	RCC_APB1Periph_TIM7
 #define TIMER_APB2	0
 
-#define OVN_PWM_TIM		TIM3
+#define OVN_PWM_TIM	TIM3
 #define OVN_PWM_APB1	RCC_APB1Periph_TIM3
 #define OVN_PWM_APB2	RCC_APB2Periph_GPIOA
 #define OVN_PWM_GPIO	GPIOA
-#define OVN_PWM_PIN		GPIO_Pin_6
-#define OVN_PWM_MS		((SystemCoreClock / 100000) - 1)
+#define OVN_PWM_PIN	GPIO_Pin_6
+#define OVN_PWM_MS	((SystemCoreClock / 100000) - 1)
 
 #define MAX6675_MASK_STATE	0x1
 #define MAX6675_MASK_DEVICE_ID	0x2
@@ -98,6 +97,11 @@
 
 #define DEBOUNCE_DELAY		40
 
+#define MAX_OUTPUT		100
+#define MAX_ERROR		50
+
+#define TEST_PREHEAT		150
+
 /* All time data is in milliseconds unless otherwise stated */
 /* All temperature data is in degrees Celcius unless otherwise stated */
 /* All rate data is in degrees Celcius per second unless otherwise stated */
@@ -105,6 +109,7 @@
 enum thermal_state
 {
 	OFF,
+	WARMUP,
 	PREHEAT_RAMPUP,
 	PREHEAT,
 	REFLOW_RAMPUP,
@@ -121,6 +126,8 @@ struct thermocouple
 
 struct limits
 {
+	uint16_t warmup_temp_min;
+	uint8_t warmup_output;
 	uint16_t preheat_temp_min;
 	uint16_t preheat_temp_max;
 	uint32_t preheat_time_min;
@@ -144,9 +151,19 @@ struct toaster
 	struct thermocouple tc;
 	uint32_t elapsed;
 	uint32_t counter;
+	int output;
 	uint8_t max_preheat_reached;
 	uint8_t max_reflow_reached;
 	BitAction led_blue;
+};
+
+struct pid_params
+{
+	float kp;
+	float ki;
+	float kd;
+	float integral;
+	int error_prev;
 };
 
 /* Function Prototypes */
@@ -161,20 +178,23 @@ static void TIM_Configuration(void);
 static void main_noreturn(void) NORETURN;
 
 static void toaster_off();
+static void toaster_warmup();
 static void toaster_preheat();
 static void toaster_reflow();
 static void toaster_cooldown();
 
-static void ovn_pwm_set(int period_ms,int duty_percent);
+static void toaster_set_output(int output);
 
 static uint8_t debounce;
 static struct toaster oven;
 static struct limits profile =
 {
+	.warmup_temp_min = 50,
+	.warmup_output = 40,
 	.preheat_temp_min = 100,
 	.preheat_temp_max = 150,
-	.preheat_time_min = 60 * 1000,
-	.preheat_time_max = 120 * 1000,
+	.preheat_time_min = 100 * 1000,
+	.preheat_time_max = 180 * 1000,
 	.reflow_temp_min = 183,
 	.reflow_temp_max = 235,
 	.reflow_time_min = 10 * 1000,
@@ -187,6 +207,55 @@ static struct limits profile =
 	.cooldown_time_max = 10 * 60 * 1000,
 	.cooldown_rate = 5,
 };
+
+static struct pid_params pid =
+{
+	.kp = 4,
+	.ki = 0.035,
+	.kd = 45,
+	.integral = 30,
+	.error_prev = 0
+};
+
+/**
+  * @brief  PID in C, Error computed inside the routine
+  * @param : Input (measured value)
+  *   Ref: reference (target value)
+  *   Coeff: pointer to the coefficient table
+  * @retval : PID output (command)
+  */
+static float pid_calc(int error, struct pid_params *p)
+{
+	float result = 0;
+	float dterm;
+	float ferror = (float)error;
+	float pterm = p->kp * ferror;
+
+	if (pterm > MAX_ERROR || pterm < -MAX_ERROR)
+	{
+		p->integral = 0;
+	}
+	else
+	{
+		p->integral += p->ki * ferror;
+
+		if (p->integral > MAX_ERROR)
+		{
+			p->integral = MAX_ERROR;
+		}
+		else if (p->integral < -MAX_ERROR)
+		{
+			p->integral = 0;
+		}
+	}
+
+	dterm = p->kd * ((float)(error - p->error_prev));
+	result = pterm + p->integral + dterm;
+
+	p->error_prev = error;
+
+	return result;
+}
 
 void assert_failed(uint8_t *function, uint32_t line)
 {
@@ -201,7 +270,7 @@ void assert_failed(uint8_t *function, uint32_t line)
 int outbyte(int ch) {
 	while (USART_GetFlagStatus(USART, USART_FLAG_TXE) == RESET);
 	USART_SendData(USART, (uint8_t)ch);
-	while (USART_GetFlagStatus(USART, USART_FLAG_TC) == RESET);
+	//while (USART_GetFlagStatus(USART, USART_FLAG_TC) == RESET);
 	return ch;
 }
 
@@ -218,7 +287,7 @@ inline void main_noreturn(void)
 	RCC_Configuration();
 	GPIO_Configuration();
 	USART_Configuration();
-	tprintf("\r\nBooting Toaster Application Version 1.0...\r\n");
+	tprintf("\r\n=== Toaster Reflow Oven ===\r\n");
 	EXTI_Configuration();
 	RTC_Configuration();
 	NVIC_Configuration();
@@ -256,7 +325,7 @@ void RCC_Configuration(void)
 			USART_APB2 |
 			SPI_APB2 |
 			TIMER_APB2 |
-			OVN_PWM_APB1),
+			OVN_PWM_APB2),
 		ENABLE);
 }
 
@@ -451,7 +520,7 @@ void SPI_Configuration(void)
 	SPI_InitStructure.SPI_CPOL = SPI_CLK_POL;
 	SPI_InitStructure.SPI_CPHA = SPI_CLK_PHASE;
 	SPI_InitStructure.SPI_NSS = SPI_SLAVE_MODE;
-	SPI_InitStructure.SPI_BaudRatePrescaler = SPI_BaudRatePrescaler_64;
+	SPI_InitStructure.SPI_BaudRatePrescaler = SPI_BaudRatePrescaler_4;
 	SPI_InitStructure.SPI_FirstBit = SPI_FirstBit_MSB;
 	SPI_InitStructure.SPI_CRCPolynomial = 7;
 	SPI_Init(SPI, &SPI_InitStructure);
@@ -471,6 +540,7 @@ void SPI_Configuration(void)
 void TIM_Configuration(void)
 {
 	TIM_TimeBaseInitTypeDef  TIM_TimeBaseStructure;
+	TIM_OCInitTypeDef TIM_OCInitStructure;
 
 	/* Configure timer */
 	TIM_TimeBaseStructure.TIM_Prescaler = 0;
@@ -480,13 +550,24 @@ void TIM_Configuration(void)
 	TIM_TimeBaseStructure.TIM_RepetitionCounter = 2;
 	TIM_TimeBaseInit(TIMER, &TIM_TimeBaseStructure);
 
-	/* Configure PWM TIM for oven control */
-	ovn_pwm_set(0, 0);  // Default to off
+	/* Set Period */
+	TIM_TimeBaseStructure.TIM_Prescaler = (SystemCoreClock / 2000) - 1;
+	TIM_TimeBaseStructure.TIM_Period = 1000;
+	TIM_TimeBaseStructure.TIM_ClockDivision = 0;
+	TIM_TimeBaseStructure.TIM_CounterMode = TIM_CounterMode_CenterAligned1;
+	TIM_TimeBaseInit(OVN_PWM_TIM, &TIM_TimeBaseStructure);
 
-	/* Enable timer interrupt */
-	TIM_ITConfig(TIMER, TIM_IT_Update, ENABLE);
+	/* Enable timer counter */
+	TIM_Cmd(TIMER, ENABLE);
 
-	/* Enable oven pwm timer */
+	/* Set Duty Cycle */
+	TIM_OCInitStructure.TIM_OCMode = TIM_OCMode_PWM1;
+	TIM_OCInitStructure.TIM_OutputState = TIM_OutputState_Enable;
+	TIM_OCInitStructure.TIM_Pulse = 0;
+	TIM_OCInitStructure.TIM_OCPolarity = TIM_OCPolarity_High;
+	TIM_OC1Init(OVN_PWM_TIM, &TIM_OCInitStructure);
+
+	/* Enable oven PWM timer */
 	TIM_OC1PreloadConfig(OVN_PWM_TIM, TIM_OCPreload_Enable);
 	TIM_ARRPreloadConfig(OVN_PWM_TIM, ENABLE);
 	TIM_Cmd(OVN_PWM_TIM, ENABLE);
@@ -506,8 +587,8 @@ void EXTI0_IRQHandler(void)
 	{
 		debounce = DEBOUNCE_DELAY;
 
-		/* Enable timer counter */
-		TIM_Cmd(TIMER, ENABLE);
+		/* Enable timer interrupt */
+		TIM_ITConfig(TIMER, TIM_IT_Update, ENABLE);
 	}
 }
 
@@ -556,6 +637,7 @@ void SPI2_IRQHandler(void)
 
 	/* Get SPI data */
 	data = SPI_I2S_ReceiveData(SPI);
+	//tprintf("0x%x\r\n", data);
 
 	/* Set thermocouple data */
 	oven.tc.temp_prev = oven.tc.temp;
@@ -567,38 +649,18 @@ void SPI2_IRQHandler(void)
 		toaster_off();
 		tprintf("Thermocouple is open!\r\n");
 	}
-}
-
-/**
-  * @brief  This function handles timer interrupt request.
-  * @param  None
-  * @retval None
-  */
-void TIM7_IRQHandler(void)
-{
-	/* Clear the timer update pending bit */
-	TIM_ClearITPendingBit(TIMER, TIM_IT_Update);
-
-	if (!debounce)
+	else
 	{
-		oven.elapsed++;
-		oven.counter++;
-
-		/* Activate slave select */
-		GPIO_WriteBit(SPI_GPIO, SPI_PIN_NSS, Bit_RESET);
-
-		/* Start temperature read */
-		SPI_I2S_SendData(SPI, 0);
-
-		if (oven.elapsed % 3000 == 0)
-		{
-			tprintf("%d,%d\r\n", oven.elapsed, oven.tc.temp);
-		}
+		tprintf("%d,%d\r\n", oven.elapsed, oven.tc.temp);
 
 		switch (oven.state)
 		{
 			case OFF:
 				break;
+			case WARMUP:
+			{
+				toaster_warmup();
+			} break;
 			case PREHEAT_RAMPUP:
 			case PREHEAT:
 			{
@@ -623,6 +685,32 @@ void TIM7_IRQHandler(void)
 			} break;
 		}
 	}
+}
+
+/**
+  * @brief  This function handles timer interrupt request.
+  * @param  None
+  * @retval None
+  */
+void TIM7_IRQHandler(void)
+{
+	/* Clear the timer update pending bit */
+	TIM_ClearITPendingBit(TIMER, TIM_IT_Update);
+
+	if (!debounce)
+	{
+		oven.elapsed++;
+		oven.counter++;
+
+		if ((oven.elapsed % 250) == 0)
+		{
+			/* Activate slave select */
+			GPIO_WriteBit(SPI_GPIO, SPI_PIN_NSS, Bit_RESET);
+
+			/* Start temperature read */
+			SPI_I2S_SendData(SPI, 0);
+		}
+	}
 	else
 	{
 		debounce--;
@@ -635,19 +723,19 @@ void TIM7_IRQHandler(void)
 				{
 					case OFF:
 					{
-						toaster_preheat();
+						toaster_warmup();
 					} break;
 
 					default:
 					{
-						toaster_cooldown();
+						toaster_off();
 					} break;
 				}
 			}
 			else /* False positive */
 			{
-				/* Disable timer counter */
-				TIM_Cmd(TIMER, DISABLE);
+				/* Disable timer interrupt */
+				TIM_ITConfig(TIMER, TIM_IT_Update, DISABLE);
 			}
 		}
 	}
@@ -660,6 +748,11 @@ void toaster_goto(enum thermal_state state)
 		case OFF:
 		{
 			tprintf(">OFF\r\n");
+		} break;
+
+		case WARMUP:
+		{
+			tprintf(">WARMUP\r\n");
 		} break;
 
 		case PREHEAT_RAMPUP:
@@ -700,8 +793,8 @@ void toaster_goto(enum thermal_state state)
 
 void toaster_off()
 {
-	/* Disable timer counter */
-	TIM_Cmd(TIMER, DISABLE);
+	/* Disable timer interrupt */
+	TIM_ITConfig(TIMER, TIM_IT_Update, DISABLE);
 
 	/* Disable the RTC second interrupt */
 	RTC_ITConfig(RTC_IT_SEC, DISABLE);
@@ -714,29 +807,42 @@ void toaster_off()
 	oven.led_blue = 0;
 
 	/* Turn off the oven */
-	ovn_pwm_set(0, 0);
+	toaster_set_output(0);
 
 	toaster_goto(OFF);
 }
 
-void toaster_preheat()
+void toaster_warmup()
 {
-	if (oven.state == OFF)
+	if (oven.state != WARMUP)
 	{
+		/* Reset toaster variables */
+		oven.elapsed = 0;
+		oven.max_preheat_reached = 0;
+		oven.max_reflow_reached = 0;
+
+		/* Update state */
+		toaster_goto(WARMUP);
+
 		/* Turn on green LED */
 		GPIO_WriteBit(LED_GPIO, LED_PIN_GREEN, Bit_SET);
 
 		/* Enable the RTC second interrupt */
 		RTC_ITConfig(RTC_IT_SEC, ENABLE);
 
-		/* Enable timer counter */
-		TIM_Cmd(TIMER, ENABLE);
+		toaster_set_output(profile.warmup_output);
+	}
 
-		/* Reset toaster variables */
-		oven.elapsed = 0;
-		oven.max_preheat_reached = 0;
-		oven.max_reflow_reached = 0;
+	if (oven.tc.temp >= profile.warmup_temp_min)
+	{
+		toaster_preheat();
+	}
+}
 
+void toaster_preheat()
+{
+	if (oven.state == WARMUP)
+	{
 		toaster_goto(PREHEAT_RAMPUP);
 	}
 	else if (oven.state == PREHEAT_RAMPUP)
@@ -747,20 +853,36 @@ void toaster_preheat()
 		}
 		else if (oven.counter >= profile.preheat_time_max)
 		{
+#ifdef TEST_PREHEAT
+			toaster_off();
+#else
 			toaster_reflow();
+#endif
 		}
 	}
 	else if (oven.state == PREHEAT)
 	{
 		if (oven.counter >= profile.preheat_time_max)
 		{
+#ifdef TEST_PREHEAT
+			toaster_off();
+#else
 			toaster_reflow();
+#endif
 		}
 	}
 	else
 	{
 		toaster_off();
 		tprintf("Invalid state!\r\n");
+	}
+
+	if (oven.state == PREHEAT_RAMPUP || oven.state == PREHEAT)
+	{
+#ifdef TEST_PREHEAT
+		oven.output = TEST_PREHEAT;
+#endif
+		toaster_set_output(pid_calc(oven.output - oven.tc.temp, &pid));
 	}
 }
 
@@ -814,23 +936,25 @@ void toaster_cooldown()
 	}
 }
 
-void ovn_pwm_set(int period_ms,int duty_percent)
+void toaster_set_output(int output)
 {
-	TIM_TimeBaseInitTypeDef  TIM_TimeBaseStructure;
-	TIM_OCInitTypeDef TIM_OCInitStructure;
-	tprintf("Setting oven PWM: Period=%dms, Duty=%d%%\n", period_ms, duty_percent);
+	uint8_t duty;
 
-	/* Set Period of waveform */
-	TIM_TimeBaseStructure.TIM_Prescaler = OVN_PWM_MS * period_ms;
-	TIM_TimeBaseStructure.TIM_Period = 100;
-	TIM_TimeBaseStructure.TIM_ClockDivision = 0;
-	TIM_TimeBaseStructure.TIM_CounterMode = TIM_CounterMode_Up;
-	TIM_TimeBaseInit(OVN_PWM_TIM, &TIM_TimeBaseStructure);
+	if (output > MAX_OUTPUT)
+	{
+		duty = MAX_OUTPUT;
+	}
+	else if (output < 0)
+	{
+		duty = 0;
+	}
+	else
+	{
+		duty = (uint8_t)output;
+	}
 
-	/* Set Duty Cycle */
-	TIM_OCInitStructure.TIM_OCMode = TIM_OCMode_PWM1;
-	TIM_OCInitStructure.TIM_OutputState = TIM_OutputState_Enable;
-	TIM_OCInitStructure.TIM_Pulse = duty_percent;
-	TIM_OCInitStructure.TIM_OCPolarity = TIM_OCPolarity_High;
-	TIM_OC1Init(OVN_PWM_TIM, &TIM_OCInitStructure);
+	tprintf("output=%d\r\n", output);
+	tprintf("duty=%d%%\r\n", duty);
+
+	TIM_SetCompare1(OVN_PWM_TIM, duty * 10);
 }

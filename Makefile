@@ -25,7 +25,7 @@
 
 # Set developer code and compile options
 # Set to YES for debugging
-DEBUG = YES
+DEBUG ?= YES
 # Set to YES when using Code Sourcery toolchain
 CODE_SOURCERY=YES
 
@@ -78,7 +78,7 @@ RTOSINCDIR = $(RTOSSRCDIR)/include
 # use file-extension c for "c-only"-files
 
 ## MAIN:
-SRC =  main.c
+SRC = main.c
 
 ## COMMON:
 SRC +=  $(COMMONDIR)/fault.c
@@ -139,7 +139,7 @@ CPPSRCARM =
 # it will preserve the spelling of the filenames, and gcc itself does
 # care about how the name is spelled on its command-line.
 ASRC = $(CMSISDIR)/DeviceSupport/ST/STM32F10x/startup/gcc_ride7/startup_stm32f10x_$(MODEL).s
-ASRC += $(STMDSPSRCDIR)/asm/gcc/PID_stm32.s
+#ASRC += $(STMDSPSRCDIR)/asm/gcc/PID_stm32.s
 
 # List Assembler source files here which must be assembled in ARM-Mode..
 ASRCARM = 
