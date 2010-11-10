@@ -1,9 +1,9 @@
 /**
  ******************************************************************************
  *
- * @file       common.h
+ * @file       stm32_common.h
  * @author     Stephen Caudle Copyright (C) 2010.
- * @brief      Main header.
+ * @brief      STM32 common header
  * @see        The GNU Public License (GPL) Version 3
  *
  *****************************************************************************/
@@ -24,31 +24,19 @@
  */
 
 
-#ifndef COMMON_H
-#define COMMON_H
+#ifndef STM32_COMMON_H
+#define STM32_COMMON_H
 
-#define SUCCESS(e) (e >= 0)
-#define FAILURE(e) (e < 0)
+#define GPIO_NUM_PORTS	7
 
-#define ERR_GENERIC	1 /* Generic error */
-#define ERR_EXIST	2 /* Already exists */
-#define ERR_NOINIT	3 /* Not initialized */
-#define ERR_NOIMP	4 /* Not implemented */
-#define ERR_PARAM	5 /* Invalid parameter */
-#define ERR_TIMEOUT	6 /* Timeout */
-#define ERR_OVERFLOW	7 /* Overflow */
-#define ERR_NOCONNECT	8 /* Not connected */
+struct stm32_apb_periph
+{
+	void (*clock)(uint32_t RCC_APB1Periph, FunctionalState NewState);
+	uint32_t periph;
+};
 
-#define IRQ_PRIO_LOW				12		// lower than RTOS
-#define IRQ_PRIO_MID				8		// higher than RTOS
-#define IRQ_PRIO_HIGH				5		// for SPI, ADC, I2C etc...
-#define IRQ_PRIO_HIGHEST			4 		// for USART etc...
+extern GPIO_TypeDef* gpio_port[GPIO_NUM_PORTS];
+extern struct stm32_apb_periph gpio_apb[GPIO_NUM_PORTS];
 
-#define NORETURN __attribute__((noreturn))
-
-int common_init(void);
-void delay_us(uint16_t count);
-void delay_ms(uint16_t count);
-
-#endif /* COMMON_H */
+#endif /* STM32_COMMON_H */
 

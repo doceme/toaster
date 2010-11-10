@@ -35,7 +35,7 @@ TCHAIN_PREFIX = arm-none-eabi-
 REMOVE_CMD = rm
 
 FLASH_TOOL = OPENOCD
-#RTOS = FREERTOS
+RTOS = FREERTOS
 
 # YES enables -mthumb option to flags for source-files listed 
 # in SRC and CPPSRC
@@ -79,6 +79,9 @@ RTOSINCDIR = $(RTOSSRCDIR)/include
 
 ## MAIN:
 SRC = main.c
+SRC += stm32_common.c
+SRC += stm32_uart.c
+SRC += stm32_spi.c
 
 ## COMMON:
 SRC +=  $(COMMONDIR)/fault.c
@@ -114,7 +117,7 @@ SRC += $(RTOSSRCDIR)/tasks.c
 
 ## RTOS Portable
 SRC += $(RTOSSRCDIR)/portable/GCC/ARM_CM3/port.c
-SRC += $(RTOSSRCDIR)/portable/MemMang/heap_2.c
+SRC += $(RTOSSRCDIR)/portable/MemMang/heap_1.c
 endif
 
 # List C source files here which must be compiled in ARM-Mode (no -mthumb).
@@ -138,8 +141,8 @@ CPPSRCARM =
 # Even though the DOS/Win* filesystem matches both .s and .S the same,
 # it will preserve the spelling of the filenames, and gcc itself does
 # care about how the name is spelled on its command-line.
-ASRC = $(CMSISDIR)/DeviceSupport/ST/STM32F10x/startup/gcc_ride7/startup_stm32f10x_$(MODEL).s
-#ASRC += $(STMDSPSRCDIR)/asm/gcc/PID_stm32.s
+#ASRC = $(CMSISDIR)/DeviceSupport/ST/STM32F10x/startup/gcc_ride7/startup_stm32f10x_$(MODEL).s
+ASRC = $(STM32DIR)/startup_stm32f10x_$(MODEL).s
 
 # List Assembler source files here which must be assembled in ARM-Mode..
 ASRCARM = 
@@ -196,7 +199,7 @@ DEBUGF = gdb
 
 # Place project-specific -D (define) and/or 
 # -U options for C here.
-CDEFS = -DSTM32F10X_$(MODEL,UC)
+CDEFS = -DSTM32F10X_$(shell echo $(MODEL) | tr a-z A-Z)
 CDEFS += -DUSE_STDPERIPH_DRIVER
 CDEFS += -DUSE_$(BOARD)
 CDEFS += -DHSE_VALUE=$(F_XTAL)UL

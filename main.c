@@ -23,11 +23,21 @@
  * 59 Temple Place, Suite 330, Boston, MA 02111-1307 USA
  */
 
-/* Includes */
+/* STM32 standard peripheral library */
 #include <stm32f10x.h>
 #include <stm32f10x_conf.h>
+
+/* FreeRTOS includes */
+#include <FreeRTOS.h>
+#include <task.h>
+#include <queue.h>
+#include <semphr.h>
+
+/* Other includes */
 #include <stdlib.h>
 #include "common.h"
+#include "spi.h"
+#include "uart.h"
 #include "tprintf.h"
 
 #define LED_GPIO	GPIOC
@@ -49,33 +59,6 @@
 
 #define RTC_APB1	(RCC_APB1Periph_PWR | RCC_APB1Periph_BKP)
 #define RTC_APB2	0
-
-#define USART		USART1
-#define USART_APB1	0
-#define USART_APB2	RCC_APB2Periph_GPIOA | RCC_APB2Periph_USART1
-#define USART_GPIO	GPIOA
-#define USART_PIN_TX	GPIO_Pin_9
-#define USART_BAUDRATE	115200
-#define USART_WORD_LEN	USART_WordLength_8b
-#define USART_STOP_BITS	USART_StopBits_1
-#define USART_PARITY	USART_Parity_No
-#define USART_HW_FLOW	USART_HardwareFlowControl_None
-#define USART_MODE	USART_Mode_Tx
-
-#define SPI		SPI2
-#define SPI_IRQ		SPI2_IRQn
-#define SPI_APB1	RCC_APB1Periph_SPI2
-#define SPI_APB2	RCC_APB2Periph_AFIO | RCC_APB2Periph_GPIOB
-#define SPI_DIRECTION	SPI_Direction_2Lines_FullDuplex
-#define SPI_MODE	SPI_Mode_Master
-#define SPI_DATA_SIZE	SPI_DataSize_16b
-#define SPI_CLK_POL	SPI_CPOL_Low
-#define SPI_CLK_PHASE	SPI_CPHA_2Edge
-#define SPI_SLAVE_MODE	SPI_NSS_Soft
-#define SPI_GPIO	GPIOB
-#define SPI_PIN_SCK	GPIO_Pin_13
-#define SPI_PIN_MISO	GPIO_Pin_14
-#define SPI_PIN_NSS	GPIO_Pin_12
 
 #define TIMER		TIM7
 #define TIMER_IRQ	TIM7_IRQn
@@ -101,6 +84,8 @@
 #define MAX_ERROR		50
 
 #define TEST_PREHEAT		150
+
+#define MS_PER_SEC		1000
 
 /* All time data is in milliseconds unless otherwise stated */
 /* All temperature data is in degrees Celcius unless otherwise stated */
@@ -169,24 +154,29 @@ struct pid_params
 /* Function Prototypes */
 static void RCC_Configuration(void);
 static void GPIO_Configuration(void);
-static void USART_Configuration(void);
 static void EXTI_Configuration(void);
 static void RTC_Configuration(void);
 static void NVIC_Configuration(void);
-static void SPI_Configuration(void);
 static void TIM_Configuration(void);
+
+static void main_task(void *pvParameters) NORETURN;
 static void main_noreturn(void) NORETURN;
 
 static void toaster_off();
+#if 0
 static void toaster_warmup();
 static void toaster_preheat();
 static void toaster_reflow();
 static void toaster_cooldown();
+#endif
+
+static xTaskHandle xMainTask = NULL;
 
 static void toaster_set_output(int output);
 
 static uint8_t debounce;
 static struct toaster oven;
+#if 0
 static struct limits profile =
 {
 	.warmup_temp_min = 50,
@@ -216,7 +206,31 @@ static struct pid_params pid =
 	.integral = 30,
 	.error_prev = 0
 };
+#endif
 
+static struct spi_device max6675 =
+{
+	.data_bits = 16,
+	.port = 1,
+	.gpio_port = 1,
+	.pin_clk = GPIO_Pin_13,
+	.pin_mosi = GPIO_Pin_14,
+	.pin_cs = GPIO_Pin_12,
+	.mode = SPI_MODE_1,
+	.speed = 4000000
+};
+
+static struct uart_device debug =
+{
+	.port = 0,
+	.gpio_port = 0,
+	.pin_tx = GPIO_Pin_9,
+	.speed = 115200,
+	.data_bits = 8,
+	.stop_bits = 1
+};
+
+#if 0
 /**
   * @brief  PID in C, Error computed inside the routine
   * @param : Input (measured value)
@@ -256,6 +270,7 @@ static float pid_calc(int error, struct pid_params *p)
 
 	return result;
 }
+#endif
 
 void assert_failed(uint8_t *function, uint32_t line)
 {
@@ -268,9 +283,7 @@ void assert_failed(uint8_t *function, uint32_t line)
  * @retval None
  */
 int outbyte(int ch) {
-	while (USART_GetFlagStatus(USART, USART_FLAG_TXE) == RESET);
-	USART_SendData(USART, (uint8_t)ch);
-	//while (USART_GetFlagStatus(USART, USART_FLAG_TC) == RESET);
+	uart_write_char(ch);
 	return ch;
 }
 
@@ -286,15 +299,22 @@ inline void main_noreturn(void)
 {
 	RCC_Configuration();
 	GPIO_Configuration();
-	USART_Configuration();
+	uart_init(&debug);
 	tprintf("\r\n=== Toaster Reflow Oven ===\r\n");
 	EXTI_Configuration();
 	RTC_Configuration();
 	NVIC_Configuration();
-	SPI_Configuration();
 	TIM_Configuration();
+	spi_init(&max6675);
 	tprintf("Init Complete.\r\n");
 	tprintf("Time (s),Temp (c)\r\n");
+
+	/* Create a FreeRTOS task */
+	xTaskCreate(main_task, (signed portCHAR *)"main", configMINIMAL_STACK_SIZE , NULL, tskIDLE_PRIORITY + 1, &xMainTask);
+	assert_param(xMainTask);
+
+	/* Start the FreeRTOS scheduler */
+	vTaskStartScheduler();
 
 	while (1);
 }
@@ -311,8 +331,6 @@ void RCC_Configuration(void)
 		(LED_APB1 |
 			BTN_APB1 |
 			RTC_APB1 |
-			USART_APB1 |
-			SPI_APB1 |
 			TIMER_APB1 |
 			OVN_PWM_APB1),
 		ENABLE);
@@ -322,8 +340,6 @@ void RCC_Configuration(void)
 		(LED_APB2 |
 			BTN_APB2 |
 			RTC_APB2 |
-			USART_APB2 |
-			SPI_APB2 |
 			TIMER_APB2 |
 			OVN_PWM_APB2),
 		ENABLE);
@@ -349,52 +365,14 @@ void GPIO_Configuration(void)
 	GPIO_InitStructure.GPIO_Mode = GPIO_Mode_IN_FLOATING;
 	GPIO_Init(BTN_GPIO, &GPIO_InitStructure);
 
-	/* Configure SPI pins */
-	/* Deactivate slave select */
-	GPIO_WriteBit(SPI_GPIO, SPI_PIN_NSS, Bit_SET);
-	GPIO_InitStructure.GPIO_Pin = SPI_PIN_SCK | SPI_PIN_MISO;
-	GPIO_InitStructure.GPIO_Mode = GPIO_Mode_AF_PP;
-	GPIO_Init(SPI_GPIO, &GPIO_InitStructure);
-	GPIO_InitStructure.GPIO_Pin = SPI_PIN_NSS;
-	GPIO_InitStructure.GPIO_Mode = GPIO_Mode_Out_PP;
-	GPIO_Init(SPI_GPIO, &GPIO_InitStructure);
-
 	/* Configure the main PWM to control the oven */
 	GPIO_InitStructure.GPIO_Pin = OVN_PWM_PIN;
 	GPIO_InitStructure.GPIO_Speed = GPIO_Speed_50MHz;
 	GPIO_InitStructure.GPIO_Mode = GPIO_Mode_AF_PP;
 	GPIO_Init(OVN_PWM_GPIO, &GPIO_InitStructure);
 
-	/* Configure USART pins */
-	GPIO_InitStructure.GPIO_Pin = USART_PIN_TX;
-	GPIO_InitStructure.GPIO_Mode = GPIO_Mode_AF_PP;
-	GPIO_Init(USART_GPIO, &GPIO_InitStructure);
-
 	/* Connect button EXTI Line to button GPIO pin */
 	GPIO_EXTILineConfig(BTN_PORT_SRC, BTN_PIN_SRC);
-}
-
-/**
- * @brief  Configures the USART.
- * @param  None
- * @retval None
- */
-void USART_Configuration(void)
-{
-	USART_InitTypeDef USART_InitStructure;
-
-	/* Configure the USART */
-	USART_InitStructure.USART_BaudRate = USART_BAUDRATE;
-	USART_InitStructure.USART_WordLength = USART_WORD_LEN;
-	USART_InitStructure.USART_StopBits = USART_STOP_BITS;
-	USART_InitStructure.USART_Parity = USART_PARITY;
-	USART_InitStructure.USART_HardwareFlowControl = USART_HW_FLOW;
-	USART_InitStructure.USART_Mode = USART_MODE;
-
-	USART_Init(USART, &USART_InitStructure);
-
-	/* Enable the USART */
-	USART_Cmd(USART, ENABLE);
 }
 
 /**
@@ -491,45 +469,11 @@ void NVIC_Configuration(void)
 	NVIC_InitStructure.NVIC_IRQChannelCmd = ENABLE;
 	NVIC_Init(&NVIC_InitStructure);
 
-	/* Enable and set SPI interrupt */
-	NVIC_InitStructure.NVIC_IRQChannel = SPI_IRQ;
-	NVIC_InitStructure.NVIC_IRQChannelPreemptionPriority = 0x0;
-	NVIC_InitStructure.NVIC_IRQChannelCmd = ENABLE;
-	NVIC_Init(&NVIC_InitStructure);
-
 	/* Enable timer interrupt */
 	NVIC_InitStructure.NVIC_IRQChannel = TIMER_IRQ;
 	NVIC_InitStructure.NVIC_IRQChannelPreemptionPriority = 0x1;
 	NVIC_InitStructure.NVIC_IRQChannelCmd = ENABLE;
 	NVIC_Init(&NVIC_InitStructure);
-}
-
-/**
-  * @brief  Configure the SPI controller.
-  * @param  None
-  * @retval None
-  */
-void SPI_Configuration(void)
-{
-	SPI_InitTypeDef SPI_InitStructure;
-
-	/* Configure SPI controller */
-	SPI_InitStructure.SPI_Direction = SPI_DIRECTION;
-	SPI_InitStructure.SPI_Mode = SPI_MODE;
-	SPI_InitStructure.SPI_DataSize = SPI_DATA_SIZE;
-	SPI_InitStructure.SPI_CPOL = SPI_CLK_POL;
-	SPI_InitStructure.SPI_CPHA = SPI_CLK_PHASE;
-	SPI_InitStructure.SPI_NSS = SPI_SLAVE_MODE;
-	SPI_InitStructure.SPI_BaudRatePrescaler = SPI_BaudRatePrescaler_4;
-	SPI_InitStructure.SPI_FirstBit = SPI_FirstBit_MSB;
-	SPI_InitStructure.SPI_CRCPolynomial = 7;
-	SPI_Init(SPI, &SPI_InitStructure);
-
-	/* Enable SPI interrupt */
-	SPI_I2S_ITConfig(SPI, SPI_I2S_IT_RXNE, ENABLE);
-
-	/* Enable SPI */
-	SPI_Cmd(SPI, ENABLE);
 }
 
 /**
@@ -624,70 +568,6 @@ void RTC_IRQHandler(void)
 }
 
 /**
-  * @brief  This function handles SPI interrupt request.
-  * @param  None
-  * @retval None
-  */
-void SPI2_IRQHandler(void)
-{
-	uint16_t data;
-
-	/* Deactivate slave select */
-	GPIO_WriteBit(SPI_GPIO, SPI_PIN_NSS, Bit_SET);
-
-	/* Get SPI data */
-	data = SPI_I2S_ReceiveData(SPI);
-	//tprintf("0x%x\r\n", data);
-
-	/* Set thermocouple data */
-	oven.tc.temp_prev = oven.tc.temp;
-	oven.tc.temp = ((data & MAX6675_MASK_TC_TEMP) >> 3) >> 2;
-	oven.tc.open = ((data & MAX6675_MASK_TC_INPUT) >> 2);
-
-	if (oven.tc.open)
-	{
-		toaster_off();
-		tprintf("Thermocouple is open!\r\n");
-	}
-	else
-	{
-		tprintf("%d,%d\r\n", oven.elapsed, oven.tc.temp);
-
-		switch (oven.state)
-		{
-			case OFF:
-				break;
-			case WARMUP:
-			{
-				toaster_warmup();
-			} break;
-			case PREHEAT_RAMPUP:
-			case PREHEAT:
-			{
-				toaster_preheat();
-			} break;
-
-			case REFLOW_RAMPUP:
-			case REFLOW:
-			{
-				toaster_reflow();
-			} break;
-
-			case COOLDOWN:
-			{
-				toaster_cooldown();
-			} break;
-
-			default:
-			{
-				toaster_off();
-				tprintf("Invalid state! %d\r\n", oven.state);
-			} break;
-		}
-	}
-}
-
-/**
   * @brief  This function handles timer interrupt request.
   * @param  None
   * @retval None
@@ -702,6 +582,7 @@ void TIM7_IRQHandler(void)
 		oven.elapsed++;
 		oven.counter++;
 
+#if 0
 		if ((oven.elapsed % 250) == 0)
 		{
 			/* Activate slave select */
@@ -710,6 +591,7 @@ void TIM7_IRQHandler(void)
 			/* Start temperature read */
 			SPI_I2S_SendData(SPI, 0);
 		}
+#endif
 	}
 	else
 	{
@@ -719,6 +601,23 @@ void TIM7_IRQHandler(void)
 		{
 			if (GPIO_ReadInputDataBit(BTN_GPIO, BTN_PIN) == RESET)
 			{
+				uint16_t data = 0;
+				uint16_t temp = 0;
+
+				tprintf("reading...\r\n", data);
+
+				spi_request(&max6675);
+				spi_cs(SPI_CS_ACTIVATE);
+				data = spi_r16();
+				spi_cs(SPI_CS_DEACTIVATE);
+
+				temp = ((data & MAX6675_MASK_TC_TEMP) >> 3) >> 2;
+				tprintf("data=0x%04x\r\n", data);
+				tprintf("temp=%d\r\n", temp);
+
+				/* Disable timer interrupt */
+				TIM_ITConfig(TIMER, TIM_IT_Update, DISABLE);
+#if 0
 				switch (oven.state)
 				{
 					case OFF:
@@ -731,6 +630,7 @@ void TIM7_IRQHandler(void)
 						toaster_off();
 					} break;
 				}
+#endif
 			}
 			else /* False positive */
 			{
@@ -812,6 +712,7 @@ void toaster_off()
 	toaster_goto(OFF);
 }
 
+#if 0
 void toaster_warmup()
 {
 	if (oven.state != WARMUP)
@@ -935,6 +836,7 @@ void toaster_cooldown()
 		}
 	}
 }
+#endif
 
 void toaster_set_output(int output)
 {
@@ -957,4 +859,21 @@ void toaster_set_output(int output)
 	tprintf("duty=%d%%\r\n", duty);
 
 	TIM_SetCompare1(OVN_PWM_TIM, duty * 10);
+}
+
+void main_task(void *pvParameters)
+{
+	portTickType xLastWakeTime;
+
+	/* Initialise the xLastExecutionTime variable on task entry */
+	xLastWakeTime = xTaskGetTickCount();
+
+	for (;;)
+	{
+		/* Toggle green LED */
+		GPIO_SetBits(LED_GPIO, LED_PIN_GREEN);
+		vTaskDelay((1 * MS_PER_SEC) / portTICK_RATE_MS);
+		GPIO_ResetBits(LED_GPIO, LED_PIN_GREEN);
+		vTaskDelay((1 * MS_PER_SEC) / portTICK_RATE_MS);
+	}
 }
