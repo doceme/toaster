@@ -38,6 +38,7 @@
 #include "common.h"
 #include "spi.h"
 #include "uart.h"
+#include "display.h"
 #include "tprintf.h"
 
 #define LED_GPIO	GPIOC
@@ -287,6 +288,11 @@ int outbyte(int ch) {
 	return ch;
 }
 
+void delay_ms(uint16_t count)
+{
+	vTaskDelay(count / portTICK_RATE_MS);
+}
+
 /**
  * Main function
  */
@@ -305,9 +311,6 @@ inline void main_noreturn(void)
 	RTC_Configuration();
 	NVIC_Configuration();
 	TIM_Configuration();
-	spi_init(&max6675);
-	tprintf("Init Complete.\r\n");
-	tprintf("Time (s),Temp (c)\r\n");
 
 	/* Create a FreeRTOS task */
 	xTaskCreate(main_task, (signed portCHAR *)"main", configMINIMAL_STACK_SIZE , NULL, tskIDLE_PRIORITY + 1, &xMainTask);
@@ -868,12 +871,18 @@ void main_task(void *pvParameters)
 	/* Initialise the xLastExecutionTime variable on task entry */
 	xLastWakeTime = xTaskGetTickCount();
 
+	spi_init(&max6675);
+	tprintf("Init Complete.\r\n");
+	tprintf("Time (s),Temp (c)\r\n");
+
+	display_init();
+
 	for (;;)
 	{
 		/* Toggle green LED */
 		GPIO_SetBits(LED_GPIO, LED_PIN_GREEN);
-		vTaskDelay((1 * MS_PER_SEC) / portTICK_RATE_MS);
+		delay_ms(1000);
 		GPIO_ResetBits(LED_GPIO, LED_PIN_GREEN);
-		vTaskDelay((1 * MS_PER_SEC) / portTICK_RATE_MS);
+		delay_ms(1000);
 	}
 }

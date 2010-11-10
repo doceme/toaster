@@ -115,8 +115,3 @@ void delay_us(uint16_t count)
 {
 	delay(count, DELAY_PRESCALER_US);
 }
-
-void delay_ms(uint16_t count)
-{
-	delay(count, DELAY_PRESCALER_MS);
-}
