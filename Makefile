@@ -79,7 +79,7 @@ RTOSINCDIR = $(RTOSSRCDIR)/include
 
 ## MAIN:
 SRC = main.c
-SRC += lcd.c
+SRC += ssd2119.c
 SRC += stm32_common.c
 SRC += stm32_uart.c
 SRC += stm32_spi.c
