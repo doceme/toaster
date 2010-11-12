@@ -238,7 +238,7 @@ int display_init(void)
 	lcd_write_reg(0x37, 0x0300);
 	lcd_write_reg(0x3A, 0x1200);
 	lcd_write_reg(0x3B, 0x0800);
-	lcd_write_reg(0x07, 0x0033);    // Display Control 
+	lcd_write_reg(0x07, 0x0033);    // Display Control
 
 	delay_ms(150);
 
@@ -256,8 +256,13 @@ int display_pixel(uint16_t x, uint16_t y, uint16_t color)
 	if (y >= LCD_PIXEL_HEIGHT)
 		y = LCD_PIXEL_HEIGHT - 1;
 
+#ifdef LCD_ORIENTATION_PORTRAIT
 	lcd_write_reg(0x4E, x);
 	lcd_write_reg(0x4F, y);
+#else
+	lcd_write_reg(0x4E, y);
+	lcd_write_reg(0x4F, x);
+#endif
 	lcd_write_reg(0x22, color);
 
 	return 0;
