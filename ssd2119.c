@@ -60,7 +60,7 @@
 #define YELLOW			0xFFE0
 #define WHITE			0xFFFF
 
-static struct spi_device lcd =
+static struct spi_device ssd2119 =
 {
 	.data_bits = 8,
 	.port = 1,
@@ -72,7 +72,7 @@ static struct spi_device lcd =
 	.speed = 4000000
 };
 
-static uint16_t lcd_test_bars[LCD_NUM_TEST_BARS] =
+static uint16_t ssd2119_test_bars[LCD_NUM_TEST_BARS] =
 {
 	WHITE,
 	YELLOW,
@@ -82,17 +82,17 @@ static uint16_t lcd_test_bars[LCD_NUM_TEST_BARS] =
 	GREEN
 };
 
-static void lcd_write_command(uint8_t data)
+static void ssd2119_write_command(uint8_t data)
 {
-	GPIO_ResetBits(gpio_port[lcd.gpio_port], LCD_PIN_RS);
+	GPIO_ResetBits(gpio_port[ssd2119.gpio_port], LCD_PIN_RS);
 	spi_cs(SPI_CS_ACTIVATE);
 	spi_w8(data);
 	spi_cs(SPI_CS_DEACTIVATE);
 }
 
-static void lcd_write_data(uint16_t data)
+static void ssd2119_write_data(uint16_t data)
 {
-	GPIO_SetBits(gpio_port[lcd.gpio_port], LCD_PIN_RS);
+	GPIO_SetBits(gpio_port[ssd2119.gpio_port], LCD_PIN_RS);
 	spi_cs(SPI_CS_ACTIVATE);
 	spi_w8(data >> 8);
 	spi_cs(SPI_CS_DEACTIVATE);
@@ -101,49 +101,49 @@ static void lcd_write_data(uint16_t data)
 	spi_cs(SPI_CS_DEACTIVATE);
 }
 
-static inline void lcd_write_reg(uint8_t address, uint16_t data)
+static inline void ssd2119_write_reg(uint8_t address, uint16_t data)
 {
-	lcd_write_command(address);
-	lcd_write_data(data);
+	ssd2119_write_command(address);
+	ssd2119_write_data(data);
 }
 
-static void lcd_home()
+static void ssd2119_home()
 {
-	lcd_write_reg(0x44, 0xEF00); /* Vertical RAM address position */
-	lcd_write_reg(0x45, 0x0000); /* Horizontal RAM address position */
-	lcd_write_reg(0x46, 0x013F); /* Horizontal RAM address position */
+	ssd2119_write_reg(0x44, 0xEF00); /* Vertical RAM address position */
+	ssd2119_write_reg(0x45, 0x0000); /* Horizontal RAM address position */
+	ssd2119_write_reg(0x46, 0x013F); /* Horizontal RAM address position */
 
-	lcd_write_reg(0x4E, 0x0000); /* RAM address set */
-	lcd_write_reg(0x4F, 0x0000); /* RAM address set */
+	ssd2119_write_reg(0x4E, 0x0000); /* RAM address set */
+	ssd2119_write_reg(0x4F, 0x0000); /* RAM address set */
 
-	lcd_write_command(0x22); /* RAM data write/read */
+	ssd2119_write_command(0x22); /* RAM data write/read */
 }
 
-static void lcd_window(struct display_rect *rect)
+static void ssd2119_window(struct display_rect *rect)
 {
 	if (!rect)
 		return;
 
 #ifdef LCD_ORIENTATION_PORTRAIT
-	lcd_write_reg(0x44, (rect->y2 << 8) | (rect->y1 & LCD_MASK_HEIGHT)); /* Vertical RAM address position */
-	lcd_write_reg(0x45, rect->x1); /* Horizontal RAM address position */
-	lcd_write_reg(0x46, rect->x2); /* Horizontal RAM address position */
+	ssd2119_write_reg(0x44, (rect->y2 << 8) | (rect->y1 & LCD_MASK_HEIGHT)); /* Vertical RAM address position */
+	ssd2119_write_reg(0x45, rect->x1); /* Horizontal RAM address position */
+	ssd2119_write_reg(0x46, rect->x2); /* Horizontal RAM address position */
 
-	lcd_write_reg(0x4E, rect->x1); /* RAM address set */
-	lcd_write_reg(0x4F, rect->y1); /* RAM address set */
+	ssd2119_write_reg(0x4E, rect->x1); /* RAM address set */
+	ssd2119_write_reg(0x4F, rect->y1); /* RAM address set */
 #else
-	lcd_write_reg(0x44, (rect->x2 << 8) | (rect->x1 & LCD_MASK_HEIGHT)); /* Vertical RAM address position */
-	lcd_write_reg(0x45, rect->y1); /* Horizontal RAM address position */
-	lcd_write_reg(0x46, rect->y2); /* Horizontal RAM address position */
+	ssd2119_write_reg(0x44, (rect->x2 << 8) | (rect->x1 & LCD_MASK_HEIGHT)); /* Vertical RAM address position */
+	ssd2119_write_reg(0x45, rect->y1); /* Horizontal RAM address position */
+	ssd2119_write_reg(0x46, rect->y2); /* Horizontal RAM address position */
 
-	lcd_write_reg(0x4E, rect->y1); /* RAM address set */
-	lcd_write_reg(0x4F, rect->x1); /* RAM address set */
+	ssd2119_write_reg(0x4E, rect->y1); /* RAM address set */
+	ssd2119_write_reg(0x4F, rect->x1); /* RAM address set */
 #endif
 
-	lcd_write_command(0x22); /* RAM data write/read */
+	ssd2119_write_command(0x22); /* RAM data write/read */
 }
 
-void lcd_test(void)
+void ssd2119_test(void)
 {
 	uint16_t x;
 	uint16_t y;
@@ -157,12 +157,12 @@ void lcd_test(void)
 		.y2 = 119
 	};
 
-	lcd_home();
+	ssd2119_home();
 
 	for (y = 0; y < LCD_PIXEL_HEIGHT; y++)
 	{
 		for (x = 0; x < LCD_PIXEL_WIDTH; x++)
-			lcd_write_data(lcd_test_bars[i]);
+			ssd2119_write_data(ssd2119_test_bars[i]);
 
 		if ((y + 1) % (LCD_PIXEL_HEIGHT / LCD_NUM_TEST_BARS) == 0)
 			i++;
@@ -175,76 +175,76 @@ int display_init(void)
 {
 	GPIO_InitTypeDef gpio_init;
 
-	if (gpio_apb[lcd.gpio_port].clock)
+	if (gpio_apb[ssd2119.gpio_port].clock)
 	{
-		gpio_apb[lcd.gpio_port].clock(gpio_apb[lcd.gpio_port].periph, ENABLE);
+		gpio_apb[ssd2119.gpio_port].clock(gpio_apb[ssd2119.gpio_port].periph, ENABLE);
 	}
 
-	GPIO_SetBits(gpio_port[lcd.gpio_port], LCD_PIN_RS);
-	GPIO_SetBits(gpio_port[lcd.gpio_port], LCD_PIN_RESET);
+	GPIO_SetBits(gpio_port[ssd2119.gpio_port], LCD_PIN_RS);
+	GPIO_SetBits(gpio_port[ssd2119.gpio_port], LCD_PIN_RESET);
 
 	/* Configure LCD reset and register select pins */
 	gpio_init.GPIO_Pin = LCD_PIN_RESET | LCD_PIN_RS;
 	gpio_init.GPIO_Mode = GPIO_Mode_Out_PP;
 	gpio_init.GPIO_Speed = GPIO_Speed_10MHz;
-	GPIO_Init(gpio_port[lcd.gpio_port], &gpio_init);
+	GPIO_Init(gpio_port[ssd2119.gpio_port], &gpio_init);
 
-	spi_init(&lcd);
+	spi_init(&ssd2119);
 
-	GPIO_ResetBits(gpio_port[lcd.gpio_port], LCD_PIN_RESET);
+	GPIO_ResetBits(gpio_port[ssd2119.gpio_port], LCD_PIN_RESET);
 	delay_ms(200);
-	GPIO_SetBits(gpio_port[lcd.gpio_port], LCD_PIN_RESET);
+	GPIO_SetBits(gpio_port[ssd2119.gpio_port], LCD_PIN_RESET);
 	delay_ms(500);
 
 	/* Initialize registers */
-	lcd_write_reg(0x28, 0x0006);    // VCOM OTP
-	lcd_write_reg(0x00, 0x0001);    // start Oscillator
+	ssd2119_write_reg(0x28, 0x0006);    // VCOM OTP
+	ssd2119_write_reg(0x00, 0x0001);    // start Oscillator
 
-	lcd_write_reg(0x10, 0x0000);    // Exit sleep mode
+	ssd2119_write_reg(0x10, 0x0000);    // Exit sleep mode
 	delay_ms(30);
 
 #ifdef LCD_ORIENTATION_PORTRAIT
-	lcd_write_reg(0x01, 0x72EF);    // Driver Output Control
+	ssd2119_write_reg(0x01, 0x72EF);    // Driver Output Control
 #else
-	lcd_write_reg(0x01, 0x70EF);    // Driver Output Control
+	ssd2119_write_reg(0x01, 0x70EF);    // Driver Output Control
 #endif
-	lcd_write_reg(0x02, 0x0600);    // LCD Driving Waveform Control
-	lcd_write_reg(0x03, 0x6A38);    // Power Control 1
+	ssd2119_write_reg(0x02, 0x0600);    // LCD Driving Waveform Control
+	ssd2119_write_reg(0x03, 0x6A38);    // Power Control 1
 #ifdef LCD_ORIENTATION_PORTRAIT
-	lcd_write_reg(0x11, 0x6870);    // Entry Mode
+	ssd2119_write_reg(0x11, 0x6870);    // Entry Mode
 #else
-	lcd_write_reg(0x11, 0x6878);    // Entry Mode
+	ssd2119_write_reg(0x11, 0x6878);    // Entry Mode
 #endif
-	lcd_write_reg(0x0F, 0x0000);    // Gate Scan Position
-	lcd_write_reg(0x0B, 0x5308);    // Frame Cycle Control
-	lcd_write_reg(0x0C, 0x0003);    // Power Control 2
-	lcd_write_reg(0x0D, 0x000A);    // Power Control 3
-	lcd_write_reg(0x0E, 0x2E00);    // Power Control 4
-	lcd_write_reg(0x1E, 0x00BE);    // Power Control 5
-	lcd_write_reg(0x25, 0x8000);    // Frame Frequency Control
-	lcd_write_reg(0x26, 0x7800);    // Analog setting
-	lcd_write_reg(0x4E, 0x0000);    // Ram Address Set
-	lcd_write_reg(0x4F, 0x0000);    // Ram Address Set
-	lcd_write_reg(0x12, 0x08D9);    // Sleep mode
+	ssd2119_write_reg(0x0F, 0x0000);    // Gate Scan Position
+	ssd2119_write_reg(0x0B, 0x5308);    // Frame Cycle Control
+	ssd2119_write_reg(0x0C, 0x0003);    // Power Control 2
+	ssd2119_write_reg(0x0D, 0x000A);    // Power Control 3
+	ssd2119_write_reg(0x0E, 0x2E00);    // Power Control 4
+	ssd2119_write_reg(0x1E, 0x00BE);    // Power Control 5
+	ssd2119_write_reg(0x25, 0x8000);    // Frame Frequency Control
+	ssd2119_write_reg(0x26, 0x7800);    // Analog setting
+	ssd2119_write_reg(0x4E, 0x0000);    // Ram Address Set
+	ssd2119_write_reg(0x4F, 0x0000);    // Ram Address Set
+	ssd2119_write_reg(0x12, 0x08D9);    // Sleep mode
 
 	/* Gamma control */
-	lcd_write_reg(0x30, 0x0000);
-	lcd_write_reg(0x31, 0x0104);
-	lcd_write_reg(0x32, 0x0100);
-	lcd_write_reg(0x33, 0x0305);
-	lcd_write_reg(0x34, 0x0505);
-	lcd_write_reg(0x35, 0x0305);
-	lcd_write_reg(0x36, 0x0707);
-	lcd_write_reg(0x37, 0x0300);
-	lcd_write_reg(0x3A, 0x1200);
-	lcd_write_reg(0x3B, 0x0800);
-	lcd_write_reg(0x07, 0x0033);    // Display Control
+	ssd2119_write_reg(0x30, 0x0000);
+	ssd2119_write_reg(0x31, 0x0104);
+	ssd2119_write_reg(0x32, 0x0100);
+	ssd2119_write_reg(0x33, 0x0305);
+	ssd2119_write_reg(0x34, 0x0505);
+	ssd2119_write_reg(0x35, 0x0305);
+	ssd2119_write_reg(0x36, 0x0707);
+	ssd2119_write_reg(0x37, 0x0300);
+	ssd2119_write_reg(0x3A, 0x1200);
+	ssd2119_write_reg(0x3B, 0x0800);
+	ssd2119_write_reg(0x07, 0x0033);    // Display Control
 
 	delay_ms(150);
 
 	display_fill(BLACK);
 
-	lcd_test();
+	ssd2119_test();
 
 	return 0;
 }
@@ -257,13 +257,13 @@ int display_pixel(uint16_t x, uint16_t y, uint16_t color)
 		y = LCD_PIXEL_HEIGHT - 1;
 
 #ifdef LCD_ORIENTATION_PORTRAIT
-	lcd_write_reg(0x4E, x);
-	lcd_write_reg(0x4F, y);
+	ssd2119_write_reg(0x4E, x);
+	ssd2119_write_reg(0x4F, y);
 #else
-	lcd_write_reg(0x4E, y);
-	lcd_write_reg(0x4F, x);
+	ssd2119_write_reg(0x4E, y);
+	ssd2119_write_reg(0x4F, x);
 #endif
-	lcd_write_reg(0x22, color);
+	ssd2119_write_reg(0x22, color);
 
 	return 0;
 }
@@ -288,11 +288,11 @@ int display_fill_rect(struct display_rect *rect, uint16_t color)
 	uint16_t x;
 	uint16_t y;
 
-	lcd_window(rect);
+	ssd2119_window(rect);
 
 	for (y = 0; y < (rect->y2 - rect->y1) + 1; y++)
 		for (x = 0; x < (rect->x2 - rect->x1) + 1; x++)
-			lcd_write_data(color);
+			ssd2119_write_data(color);
 
 	return 0;
 }
