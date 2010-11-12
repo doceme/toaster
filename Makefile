@@ -205,6 +205,7 @@ CDEFS += -DUSE_STDPERIPH_DRIVER
 CDEFS += -DUSE_$(BOARD)
 CDEFS += -DHSE_VALUE=$(F_XTAL)UL
 CDEFS += -D$(SYSCLOCK_CL)
+CDEFS += -DCONFIG_DISPLAY_CFAF320240F
 
 
 # Place project-specific -D and/or -U options for 
