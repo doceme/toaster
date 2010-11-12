@@ -1,6 +1,6 @@
 /**
  ******************************************************************************
- * @file       lcd.c
+ * @file       ssd2119.c
  * @author     Stephen Caudle Copyright (C) 2010
  * @author     Michael Spradling Copyright (C) 2010
  * @brief      LCD implementation
@@ -29,13 +29,26 @@
 #include "common.h"
 #include "stm32_common.h"
 #include "spi.h"
-/* #include "lcd.h" */
+#include "display.h"
 
 #define LCD_PIN_RESET	GPIO_Pin_0
 #define LCD_PIN_RS	GPIO_Pin_1
 
+//#define LCD_ORIENTATION_PORTRAIT
+
+#ifdef LCD_ORIENTATION_PORTRAIT
+#define LCD_MASK_WIDTH		0x1FF
+#define LCD_MASK_HEIGHT		0xFF
 #define LCD_PIXEL_WIDTH		320
 #define LCD_PIXEL_HEIGHT	240
+#else
+#define LCD_MASK_WIDTH		0xFF
+#define LCD_MASK_HEIGHT		0x1FF
+#define LCD_PIXEL_WIDTH		240
+#define LCD_PIXEL_HEIGHT	320
+#endif
+
+#define LCD_NUM_TEST_BARS	6
 
 /* Color definitions */
 #define	BLACK			0x0000
@@ -57,6 +70,16 @@ static struct spi_device lcd =
 	.pin_cs = GPIO_Pin_2,
 	.mode = SPI_MODE_3,
 	.speed = 4000000
+};
+
+static uint16_t lcd_test_bars[LCD_NUM_TEST_BARS] =
+{
+	WHITE,
+	YELLOW,
+	MAGENTA,
+	RED,
+	CYAN,
+	GREEN
 };
 
 static void lcd_write_command(uint8_t data)
@@ -86,11 +109,36 @@ static inline void lcd_write_reg(uint8_t address, uint16_t data)
 
 static void lcd_home()
 {
-	lcd_write_reg(0x4E, 0x0000); /* RAM address set */
-	lcd_write_reg(0x4F, 0x0000); /* RAM address set */
 	lcd_write_reg(0x44, 0xEF00); /* Vertical RAM address position */
 	lcd_write_reg(0x45, 0x0000); /* Horizontal RAM address position */
 	lcd_write_reg(0x46, 0x013F); /* Horizontal RAM address position */
+
+	lcd_write_reg(0x4E, 0x0000); /* RAM address set */
+	lcd_write_reg(0x4F, 0x0000); /* RAM address set */
+
+	lcd_write_command(0x22); /* RAM data write/read */
+}
+
+static void lcd_window(struct display_rect *rect)
+{
+	if (!rect)
+		return;
+
+#ifdef LCD_ORIENTATION_PORTRAIT
+	lcd_write_reg(0x44, (rect->y2 << 8) | (rect->y1 & LCD_MASK_HEIGHT)); /* Vertical RAM address position */
+	lcd_write_reg(0x45, rect->x1); /* Horizontal RAM address position */
+	lcd_write_reg(0x46, rect->x2); /* Horizontal RAM address position */
+
+	lcd_write_reg(0x4E, rect->x1); /* RAM address set */
+	lcd_write_reg(0x4F, rect->y1); /* RAM address set */
+#else
+	lcd_write_reg(0x44, (rect->x2 << 8) | (rect->x1 & LCD_MASK_HEIGHT)); /* Vertical RAM address position */
+	lcd_write_reg(0x45, rect->y1); /* Horizontal RAM address position */
+	lcd_write_reg(0x46, rect->y2); /* Horizontal RAM address position */
+
+	lcd_write_reg(0x4E, rect->y1); /* RAM address set */
+	lcd_write_reg(0x4F, rect->x1); /* RAM address set */
+#endif
 
 	lcd_write_command(0x22); /* RAM data write/read */
 }
@@ -99,43 +147,32 @@ void lcd_test(void)
 {
 	uint16_t x;
 	uint16_t y;
+	uint16_t i = 0;
 
-	lcd_home();
-
-	for (x = 0; x < LCD_PIXEL_WIDTH; x++)
-		for (y = 0; y < LCD_PIXEL_HEIGHT; y++)
-			lcd_write_data(BLACK);
-
-	lcd_home();
-
-	for (x = 0; x < LCD_PIXEL_WIDTH; x++)
+	struct display_rect rect =
 	{
-		for (y = 0; y < LCD_PIXEL_HEIGHT; y++)
-		{
-			if (x > 279)
-				lcd_write_data(BLACK);
-			else if (x > 239)
-				lcd_write_data(BLUE);
-			else if (x > 199)
-				lcd_write_data(GREEN);
-			else if (x > 159)
-				lcd_write_data(CYAN);
-			else if (x > 119)
-				lcd_write_data(RED);
-			else if (x > 79)
-				lcd_write_data(MAGENTA);
-			else if (x > 39)
-				lcd_write_data(YELLOW);
-			else
-				lcd_write_data(WHITE);
-		}
+		.x1 = 40,
+		.y1 = 40,
+		.x2 = 79,
+		.y2 = 119
+	};
+
+	lcd_home();
+
+	for (y = 0; y < LCD_PIXEL_HEIGHT; y++)
+	{
+		for (x = 0; x < LCD_PIXEL_WIDTH; x++)
+			lcd_write_data(lcd_test_bars[i]);
+
+		if ((y + 1) % (LCD_PIXEL_HEIGHT / LCD_NUM_TEST_BARS) == 0)
+			i++;
 	}
+
+	display_fill_rect(&rect, BLUE);
 }
 
 int display_init(void)
 {
-	int result = -1;
-
 	GPIO_InitTypeDef gpio_init;
 
 	if (gpio_apb[lcd.gpio_port].clock)
@@ -166,10 +203,18 @@ int display_init(void)
 	lcd_write_reg(0x10, 0x0000);    // Exit sleep mode
 	delay_ms(30);
 
-	lcd_write_reg(0x01, 0x32EF);    // Driver Output Control
+#ifdef LCD_ORIENTATION_PORTRAIT
+	lcd_write_reg(0x01, 0x72EF);    // Driver Output Control
+#else
+	lcd_write_reg(0x01, 0x70EF);    // Driver Output Control
+#endif
 	lcd_write_reg(0x02, 0x0600);    // LCD Driving Waveform Control
 	lcd_write_reg(0x03, 0x6A38);    // Power Control 1
+#ifdef LCD_ORIENTATION_PORTRAIT
 	lcd_write_reg(0x11, 0x6870);    // Entry Mode
+#else
+	lcd_write_reg(0x11, 0x6878);    // Entry Mode
+#endif
 	lcd_write_reg(0x0F, 0x0000);    // Gate Scan Position
 	lcd_write_reg(0x0B, 0x5308);    // Frame Cycle Control
 	lcd_write_reg(0x0C, 0x0003);    // Power Control 2
@@ -197,11 +242,52 @@ int display_init(void)
 
 	delay_ms(150);
 
-	lcd_write_command(0x22);    // RAM data write/read
+	display_fill(BLACK);
 
 	lcd_test();
 
-	result = 0;
+	return 0;
+}
 
-	return result;
+int display_pixel(uint16_t x, uint16_t y, uint16_t color)
+{
+	if (x >= LCD_PIXEL_WIDTH)
+		x = LCD_PIXEL_WIDTH - 1;
+	if (y >= LCD_PIXEL_HEIGHT)
+		y = LCD_PIXEL_HEIGHT - 1;
+
+	lcd_write_reg(0x4E, x);
+	lcd_write_reg(0x4F, y);
+	lcd_write_reg(0x22, color);
+
+	return 0;
+}
+
+int display_fill(uint16_t color)
+{
+	static const struct display_rect rect =
+	{
+		.x1 = 0,
+		.y1 = 0,
+		.x2 = LCD_PIXEL_WIDTH - 1,
+		.y2 = LCD_PIXEL_HEIGHT - 1
+	};
+
+	display_fill_rect((struct display_rect *)&rect, color);
+
+	return 0;
+}
+
+int display_fill_rect(struct display_rect *rect, uint16_t color)
+{
+	uint16_t x;
+	uint16_t y;
+
+	lcd_window(rect);
+
+	for (y = 0; y < (rect->y2 - rect->y1) + 1; y++)
+		for (x = 0; x < (rect->x2 - rect->x1) + 1; x++)
+			lcd_write_data(color);
+
+	return 0;
 }
