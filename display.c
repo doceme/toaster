@@ -116,23 +116,30 @@ static int display_exec_op(const struct display_op *op)
 		return -ERR_PARAM;
 	}
 
-	switch (op->type)
+	for (;;)
 	{
-		case DISPLAY_OP_DELAY:
-			delay_ms(op->data);
-			break;
-		case DISPLAY_OP_CMD:
-			display.write_cmd(op->cmd);
-			break;
-		case DISPLAY_OP_DATA:
-			display.write_data(op->cmd);
-			break;
-		case DISPLAY_OP_REG:
-			display.write_reg(op->cmd, op->data);
-			break;
-		default:
-			tprintf("Invalid op type!\r\n");
-			return -ERR_PARAM;
+		switch (op->type)
+		{
+			case DISPLAY_OP_DELAY:
+				delay_ms(op->data);
+				break;
+			case DISPLAY_OP_CMD:
+				display.write_cmd(op->cmd);
+				break;
+			case DISPLAY_OP_DATA:
+				display.write_data(op->cmd);
+				break;
+			case DISPLAY_OP_REG:
+				display.write_reg(op->cmd, op->data);
+				break;
+			case DISPLAY_OP_DONE:
+				return 0;
+			default:
+				tprintf("Invalid op type!\r\n");
+				return -ERR_PARAM;
+		}
+
+		op++;
 	}
 
 	return 0;
@@ -140,14 +147,11 @@ static int display_exec_op(const struct display_op *op)
 
 int display_init(void)
 {
-	int i = 0;
-
 	if (display.ctl_init)
 		display.ctl_init();
 
 	if (display.init_ops)
-		while (display.init_ops[i].type != DISPLAY_OP_DONE)
-			display_exec_op(&display.init_ops[i++]);
+		display_exec_op(display.init_ops);
 
 	display_window(&screen_rect);
 	display_goto(0, 0);
