@@ -26,6 +26,18 @@
 #ifndef DISPLAY_H
 #define DISPLAY_H
 
+#include "ssd2119.h"
+
+/* Color definitions */
+#define	BLACK			0x0000
+#define	BLUE			0x001F
+#define	RED			0xF800
+#define	GREEN			0x07E0
+#define CYAN			0x07FF
+#define MAGENTA			0xF81F
+#define YELLOW			0xFFE0
+#define WHITE			0xFFFF
+
 struct display_rect
 {
 	uint16_t x1;
@@ -66,7 +78,7 @@ int display_fill(uint16_t color);
  * @retval On success, 0 is returned.
  *         On failure, a negative number is returned.
  */
-int display_fill_rect(struct display_rect *rect, uint16_t color);
+int display_fill_rect(const struct display_rect *rect, uint16_t color);
 
 enum display_op_type
 {
@@ -102,7 +114,7 @@ struct display_panel {
 	uint16_t gram_reg;
 
 	int (*ctl_init)(void);
-	int (*write_data)(uint16_t addr, uint16_t data);
+	int (*write_data)(uint16_t data);
 	int (*write_cmd)(uint16_t cmd);
 	int (*write_reg)(uint16_t addr, uint16_t data);
 };
@@ -117,7 +129,7 @@ struct display_panel {
 #define DISPLAY_HMASK		0x1FF
 #define DISPLAY_VMASK		0xFF
 
-#ifdef CONFIG_DISPLAY_PORTRAIT
+#ifdef CONFIG_DISPLAY_LANDSCAPE
 #define DISPLAY_PIXEL_WIDTH	DISPLAY_HRES
 #define DISPLAY_PIXEL_HEIGHT	DISPLAY_VRES
 #define DISPLAY_MASK_WIDTH	DISPLAY_HMASK
@@ -186,34 +198,8 @@ static const struct display_op ssd2119_ops[] =
 #define DISPLAY_CTL_INIT	ssd2119_init
 #define DISPLAY_WRITE_DATA	ssd2119_write_data
 #define DISPLAY_WRITE_CMD	ssd2119_write_cmd
-#define DISPLAY_WRITE_REG	display_write_reg
+#define DISPLAY_WRITE_REG	ssd2119_write_reg
 #endif
-
-const struct display_panel display = {
-	.init_ops	= DISPLAY_INIT_OPS,
-	.name		= DISPLAY_PANEL_NAME,
-	.vres		= DISPLAY_VRES,
-	.hres		= DISPLAY_HRES,
-	.stride		= DISPLAY_STRIDE,
-	.id		= DISPLAY_ID,
-	.vpos_reg	= DISPLAY_VPOS_REG,
-	.hpos_reg	= DISPLAY_HPOS_REG,
-	.vwnd_reg	= DISPLAY_VWND_REG,
-	.hwnd1_reg	= DISPLAY_HWND1_REG,
-	.hwnd2_reg	= DISPLAY_HWND2_REG,
-	.gram_reg	= DISPLAY_GRAM_REG,
-	.write_data	= DISPLAY_WRITE_DATA,
-	.write_cmd	= DISPLAY_WRITE_CMD,
-	.write_reg	= DISPLAY_WRITE_REG
-};
-
-static const struct display_rect screen_rect =
-{
-	.x1 = 0,
-	.y1 = 0,
-	.x2 = DISPLAY_PIXEL_WIDTH - 1,
-	.y2 = DISPLAY_PIXEL_HEIGHT - 1
-};
 
 #endif /* DISPLAY_H */
 

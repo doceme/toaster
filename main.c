@@ -864,6 +864,38 @@ void toaster_set_output(int output)
 	TIM_SetCompare1(OVN_PWM_TIM, duty * 10);
 }
 
+#define DISPLAY_NUM_TEST_BARS	6
+
+static uint16_t display_test_bars[DISPLAY_NUM_TEST_BARS] =
+{
+	WHITE,
+	YELLOW,
+	MAGENTA,
+	RED,
+	CYAN,
+	GREEN
+};
+
+static void display_test(void)
+{
+	uint16_t i = 0;
+
+	struct display_rect rect =
+	{
+		.x1 = 0,
+		.y1 = 0,
+		.x2 = DISPLAY_PIXEL_WIDTH - 1,
+		.y2 = (DISPLAY_PIXEL_HEIGHT / DISPLAY_NUM_TEST_BARS) - 1
+	};
+
+	for (i = 0; i < DISPLAY_NUM_TEST_BARS; i++)
+	{
+		display_fill_rect(&rect, display_test_bars[i]);
+		rect.y1 += DISPLAY_PIXEL_HEIGHT / DISPLAY_NUM_TEST_BARS;
+		rect.y2 += DISPLAY_PIXEL_HEIGHT / DISPLAY_NUM_TEST_BARS;
+	}
+}
+
 void main_task(void *pvParameters)
 {
 	portTickType xLastWakeTime;
@@ -876,6 +908,7 @@ void main_task(void *pvParameters)
 	tprintf("Time (s),Temp (c)\r\n");
 
 	display_init();
+	display_test();
 
 	for (;;)
 	{

@@ -33,19 +33,7 @@
 #include "tprintf.h"
 
 #define SSD2119_PIN_RESET	GPIO_Pin_0
-#define SSD2119LCD_PIN_RS	GPIO_Pin_1
-
-#define DISPLAY_NUM_TEST_BARS	6
-
-/* Color definitions */
-#define	BLACK			0x0000
-#define	BLUE			0x001F
-#define	RED			0xF800
-#define	GREEN			0x07E0
-#define CYAN			0x07FF
-#define MAGENTA			0xF81F
-#define YELLOW			0xFFE0
-#define WHITE			0xFFFF
+#define SSD2119_PIN_RS		GPIO_Pin_1
 
 static struct spi_device ssd2119 =
 {
@@ -59,17 +47,7 @@ static struct spi_device ssd2119 =
 	.speed = 4000000
 };
 
-static uint16_t display_test_bars[DISPLAY_NUM_TEST_BARS] =
-{
-	WHITE,
-	YELLOW,
-	MAGENTA,
-	RED,
-	CYAN,
-	GREEN
-};
-
-static int ssd2119_write_cmd(uint16_t cmd)
+int ssd2119_write_cmd(uint16_t cmd)
 {
 	GPIO_ResetBits(gpio_port[ssd2119.gpio_port], SSD2119_PIN_RS);
 	spi_cs(SPI_CS_ACTIVATE);
@@ -78,7 +56,7 @@ static int ssd2119_write_cmd(uint16_t cmd)
 	return 0;
 }
 
-static int ssd2119_write_data(uint16_t data)
+int ssd2119_write_data(uint16_t data)
 {
 	GPIO_SetBits(gpio_port[ssd2119.gpio_port], SSD2119_PIN_RS);
 	spi_cs(SPI_CS_ACTIVATE);
@@ -90,121 +68,14 @@ static int ssd2119_write_data(uint16_t data)
 	return 0;
 }
 
-static int display_write_reg(uint16_t addr, uint16_t data)
+int ssd2119_write_reg(uint16_t addr, uint16_t data)
 {
-	display.write_cmd(addr);
-	display.write_data(data);
+	ssd2119_write_cmd(addr);
+	ssd2119_write_data(data);
 	return 0;
 }
 
-static int display_goto(uint16_t x, uint16_t y)
-{
-	display.write_reg(display->horz_reg, x & DISPLAY_MASK_WIDTH);
-	display.write_reg(display->vert_reg, y & DISPLAY_MASK_HEIGHT);
-	display.write_cmd(display->gram_reg);
-	return 0;
-}
-
-static int display_window(const struct display_rect *rect)
-{
-	if (!rect)
-	{
-		tprintf("Invalid rect parameter!\r\n");
-		return -EPARAM;
-	}
-	else
-	{
-		uint16_t vpos;
-		uint16_t hpos;
-		uint16_t vwnd;
-		uint16_t hwnd1;
-		uint16_t hwnd2;
-
-#ifdef CONFIG_DISPLAY_PORTRAIT
-		vpos = rect->x1;
-		hpos = rect->y1;
-		vwnd = (rect->y2 << 8) | rect->y1;
-		hwnd1 = rect->x1;
-		hwnd2 = rect->x2;
-#else
-		vpos = rect->y1;
-		hpos = rect->x1;
-		vwnd = (rect->x2 << 8) | rect->x1;
-		hwnd1 = rect->y1;
-		hwnd2 = rect->y2;
-#endif
-
-		display.write_reg(display.vpos_reg, vpos);
-		display.write_reg(display.hpos_reg, hpos);
-		display.write_reg(display.vwnd_reg, vwnd);
-		display.write_reg(display.hwnd1_reg, hwnd1);
-		display.write_reg(display.hwnd2_reg, hwnd2);
-		display.write_cmd(display.gram_reg);
-	}
-
-	return 0;
-}
-
-static void display_test(void)
-{
-	uint16_t x;
-	uint16_t y;
-	uint16_t i = 0;
-
-	const struct display_rect rect =
-	{
-		.x1 = 40,
-		.y1 = 40,
-		.x2 = 79,
-		.y2 = 119
-	};
-
-	display_goto(0, 0);
-	display_window(&screen_rect);
-
-	for (y = 0; y < DISPLAY_PIXEL_HEIGHT; y++)
-	{
-		for (x = 0; x < DISPLAY_PIXEL_WIDTH; x++)
-			display.write_data(ssd2119_test_bars[i]);
-
-		if ((y + 1) % (DISPLAY_PIXEL_HEIGHT / DISPLAY_NUM_TEST_BARS) == 0)
-			i++;
-	}
-
-	display_fill_rect(&rect, BLUE);
-}
-
-static int display_exec_op(struct display_op *op)
-{
-	if (!op)
-	{
-		tprintf("Invalid op parameter!\r\n");
-		return -EPARAM;
-	}
-
-	switch (op->type)
-	{
-		case DISPLAY_OP_DELAY:
-			delay_ms(op->data);
-			break;
-		case DISPLAY_OP_CMD:
-			display.write_cmd(op->cmd);
-			break;
-		case DISPLAY_OP_DATA:
-			display.write_data(op->cmd);
-			break;
-		case DISPLAY_OP_DATA:
-			display.write_reg(op->cmd, op->data);
-			break;
-		default:
-			tprintf("Invalid op type!\r\n");
-			return -EPARAM;
-	}
-
-	return 0;
-}
-
-static int ssd2119_init(void)
+int ssd2119_init(void)
 {
 	GPIO_InitTypeDef gpio_init;
 
@@ -228,69 +99,6 @@ static int ssd2119_init(void)
 	delay_ms(200);
 	GPIO_SetBits(gpio_port[ssd2119.gpio_port], SSD2119_PIN_RESET);
 	delay_ms(500);
-
-	return 0;
-}
-
-int display_init(void)
-{
-	int i = 0;
-
-	if (display.ctl_init)
-		display_ctl_init();
-
-	if (display.init_ops)
-		while (display.init_ops[i] != DISPLAY_OP_DONE)
-			display_exec_op(&display.init_ops[i++]);
-
-	display_fill(BLACK);
-
-	display_test();
-
-	return 0;
-}
-
-int display_pixel(uint16_t x, uint16_t y, uint16_t color)
-{
-	uint16_t vpos;
-	uint16_t hpos;
-
-	if (x >= DISPLAY_PIXEL_WIDTH)
-		x = DISPLAY_PIXEL_WIDTH - 1;
-	if (y >= DISPLAY_PIXEL_HEIGHT)
-		y = DISPLAY_PIXEL_HEIGHT - 1;
-
-#ifdef CONFIG_DISPLAY_PORTRAIT
-	vpos = x;
-	hpos = y;
-#else
-	vpos = y;
-	hpos = x;
-#endif
-
-	display.write_reg(display.vpos_reg, vpos);
-	display.write_reg(display.hpos_reg, hpos);
-	display.write_reg(display.gram_reg, color);
-
-	return 0;
-}
-
-int display_fill(uint16_t color)
-{
-	display_fill_rect(&screen_rect, color);
-	return 0;
-}
-
-int display_fill_rect(struct display_rect *rect, uint16_t color)
-{
-	uint16_t x;
-	uint16_t y;
-
-	display_window(rect);
-
-	for (y = 0; y < (rect->y2 - rect->y1) + 1; y++)
-		for (x = 0; x < (rect->x2 - rect->x1) + 1; x++)
-			display.write_data(color);
 
 	return 0;
 }
