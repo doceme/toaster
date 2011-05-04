@@ -1,9 +1,9 @@
 /**
  ******************************************************************************
- * * @file       main.c
+ *
+ * @file       main.c
  * @author     Stephen Caudle Copyright (C) 2010
- * @author     Michael Spradling Copyright (C) 2010
- * @brief      Main toaster application
+ * @brief      Main implementation
  * @see        The GNU Public License (GPL) Version 3
  *
  *****************************************************************************/
@@ -23,12 +23,23 @@
  * 59 Temple Place, Suite 330, Boston, MA 02111-1307 USA
  */
 
-/* Includes */
+/* STM32 includes */
 #include <stm32f10x.h>
 #include <stm32f10x_conf.h>
-#include <stdlib.h>
+
+/* FreeRTOS includes */
+#include <FreeRTOS.h>
+#include <task.h>
+#include <queue.h>
+#include <semphr.h>
+
+/* Includes */
 #include "common.h"
 #include "tprintf.h"
+
+#define MS_PER_SEC		1000
+#define DEBOUNCE_DELAY		40
+#define TPRINTF_QUEUE_SIZE	512
 
 #define LED_GPIO	GPIOC
 #define LED_APB1	0
@@ -45,7 +56,12 @@
 #define BTN_PIN_SRC	GPIO_PinSource0
 #define BTN_EXTI_LINE	EXTI_Line0
 #define BTN_EXTI_MODE	EXTI_Mode_Interrupt
-#define BTN_EXTI_TRG	EXTI_Trigger_Falling
+#define BTN_EXTI_TRG	EXTI_Trigger_Rising_Falling
+
+#define SSR_GPIO	GPIOA
+#define SSR_APB1	0
+#define SSR_APB2	RCC_APB2Periph_GPIOA
+#define SSR_PIN		GPIO_Pin_6
 
 #define RTC_APB1	(RCC_APB1Periph_PWR | RCC_APB1Periph_BKP)
 #define RTC_APB2	0
@@ -77,17 +93,15 @@
 #define SPI_PIN_MISO	GPIO_Pin_14
 #define SPI_PIN_NSS	GPIO_Pin_12
 
-#define TIMER		TIM7
-#define TIMER_IRQ	TIM7_IRQn
-#define TIMER_APB1	RCC_APB1Periph_TIM7
-#define TIMER_APB2	0
+#define DEBOUNCE_TIMER		TIM4
+#define DEBOUNCE_TIMER_IRQ	TIM4_IRQn
+#define DEBOUNCE_TIMER_APB1	RCC_APB1Periph_TIM4
+#define DEBOUNCE_TIMER_APB2	0
 
-#define OVN_PWM_TIM	TIM3
-#define OVN_PWM_APB1	RCC_APB1Periph_TIM3
-#define OVN_PWM_APB2	RCC_APB2Periph_GPIOA
-#define OVN_PWM_GPIO	GPIOA
-#define OVN_PWM_PIN	GPIO_Pin_6
-#define OVN_PWM_MS	((SystemCoreClock / 100000) - 1)
+#define PROFILE_TIMER		TIM2
+#define PROFILE_TIMER_IRQ	TIM2_IRQn
+#define PROFILE_TIMER_APB1	RCC_APB1Periph_TIM2
+#define PROFILE_TIMER_APB2	0
 
 #define MAX6675_MASK_STATE	0x1
 #define MAX6675_MASK_DEVICE_ID	0x2
@@ -95,12 +109,16 @@
 #define MAX6675_MASK_TC_TEMP	0x7ff8
 #define MAX6675_MASK_DUMMY	0x8000
 
-#define DEBOUNCE_DELAY		40
+#define PDM_NUM_BITS		30
+#define PDM_TABLE_SIZE		32
 
-#define MAX_OUTPUT		100
-#define MAX_ERROR		50
+#define MAX_OUTPUT		PDM_TABLE_SIZE - 1
+#define MAX_ERROR		MAX_OUTPUT
+#define MIN_ERROR		0
 
-#define TEST_PREHEAT		150
+#define OVN_TEMP_TOLERANCE	1
+
+//#define DISABLE_OVEN
 
 /* All time data is in milliseconds unless otherwise stated */
 /* All temperature data is in degrees Celcius unless otherwise stated */
@@ -110,9 +128,9 @@ enum thermal_state
 {
 	OFF,
 	WARMUP,
-	PREHEAT_RAMPUP,
 	PREHEAT,
-	REFLOW_RAMPUP,
+	SOAK,
+	RAMPUP,
 	REFLOW,
 	COOLDOWN
 };
@@ -126,35 +144,35 @@ struct thermocouple
 
 struct limits
 {
-	uint16_t warmup_temp_min;
+	uint8_t running;
+	uint16_t warmup_temp;
 	uint8_t warmup_output;
-	uint16_t preheat_temp_min;
-	uint16_t preheat_temp_max;
-	uint32_t preheat_time_min;
-	uint32_t preheat_time_max;
-	float preheat_rampup_rate;
-	float preheat_rate;
-	uint16_t reflow_temp_min;
-	uint16_t reflow_temp_max;
-	uint32_t reflow_time_min;
-	uint32_t reflow_time_max;
-	float reflow_rampup_rate;
-	float reflow_rate;
-	uint16_t cooldown_temp_min;
-	uint32_t cooldown_time_max;
-	float cooldown_rate;
+	uint16_t soak_temp;
+	uint32_t soak_time;
+	uint16_t reflow_temp;
+	uint32_t reflow_time;
+	uint16_t cooldown_temp;
+	uint32_t cooldown_time;
 };
 
 struct toaster
 {
 	enum thermal_state state;
 	struct thermocouple tc;
-	uint32_t elapsed;
+	uint32_t elapsed_total;
+	uint32_t elapsed_warmup;
+	uint32_t elapsed_preheat;
+	uint32_t elapsed_soak;
+	uint32_t elapsed_reflow_rampup;
+	uint32_t elapsed_reflow;
+	uint32_t elapsed_cooldown;
 	uint32_t counter;
-	int output;
-	uint8_t max_preheat_reached;
-	uint8_t max_reflow_reached;
+	uint8_t output;
+	uint8_t max_temp_reached;
+	uint8_t soak_reached;
+	uint8_t reflow_reached;
 	BitAction led_blue;
+	BitAction led_green;
 };
 
 struct pid_params
@@ -163,115 +181,151 @@ struct pid_params
 	float ki;
 	float kd;
 	float integral;
-	int error_prev;
+	float derror_prev;
+};
+
+enum button_state
+{
+	BUTTON_STATE_UP,
+	BUTTON_STATE_DOWN
 };
 
 /* Function Prototypes */
-static void RCC_Configuration(void);
-static void GPIO_Configuration(void);
-static void USART_Configuration(void);
-static void EXTI_Configuration(void);
-static void RTC_Configuration(void);
-static void NVIC_Configuration(void);
-static void SPI_Configuration(void);
-static void TIM_Configuration(void);
+static void setup(void);
+static void setup_rcc(void);
+static void setup_gpio(void);
+static void setup_exti(void);
+static void setup_rtc(void);
+static void setup_timer(void);
+static void setup_spi(void);
+static void setup_usart(void);
+static void setup_nvic(void);
 static void main_noreturn(void) NORETURN;
 
+static void blink_toggle_green(void);
+
+static void profile_task(void *pvParameters) NORETURN;
+static void debug_task(void *pvParameters) NORETURN;
+
+static int pid_calc(int error, struct pid_params *p, float derror);
+
+static void toaster_goto(enum thermal_state state);
+static void toaster_update();
 static void toaster_off();
 static void toaster_warmup();
-static void toaster_preheat();
+static void toaster_soak();
 static void toaster_reflow();
 static void toaster_cooldown();
-
 static void toaster_set_output(int output);
 
+static xTaskHandle profile_task_handle;
+static xQueueHandle tprintf_queue;
+static xSemaphoreHandle debug_sem;
+
 static uint8_t debounce;
+static enum button_state button_state;
+
 static struct toaster oven;
 static struct limits profile =
 {
-	.warmup_temp_min = 50,
-	.warmup_output = 40,
-	.preheat_temp_min = 100,
-	.preheat_temp_max = 150,
-	.preheat_time_min = 100 * 1000,
-	.preheat_time_max = 180 * 1000,
-	.reflow_temp_min = 183,
-	.reflow_temp_max = 235,
-	.reflow_time_min = 10 * 1000,
-	.reflow_time_max = 60 * 1000,
-	.preheat_rampup_rate = 2,
-	.preheat_rate = 0.5,
-	.reflow_rampup_rate = 2.5,
-	.reflow_rate = 3,
-	.cooldown_temp_min = 50,
-	.cooldown_time_max = 10 * 60 * 1000,
-	.cooldown_rate = 5,
+	.warmup_temp = 50,
+	.warmup_output = 13,
+	.soak_temp = 160,
+	.soak_time = 120 * 1000,
+	.reflow_temp = 255,
+	.reflow_time = 30 * 1000,
+	.cooldown_temp = 50,
+	.cooldown_time = 10 * 60 * 1000,
 };
 
-static struct pid_params pid =
+static struct pid_params soak_pid =
 {
-	.kp = 4,
-	.ki = 0.035,
-	.kd = 45,
-	.integral = 30,
-	.error_prev = 0
+	.kp = 1.0,
+	.ki = 0.003,
+	.kd = 100,
+	.integral = 0,
+	.derror_prev = 0
 };
 
-/**
-  * @brief  PID in C, Error computed inside the routine
-  * @param : Input (measured value)
-  *   Ref: reference (target value)
-  *   Coeff: pointer to the coefficient table
-  * @retval : PID output (command)
-  */
-static float pid_calc(int error, struct pid_params *p)
+static struct pid_params reflow_pid =
 {
-	float result = 0;
-	float dterm;
-	float ferror = (float)error;
-	float pterm = p->kp * ferror;
+	.kp = 4.1,
+	.ki = 0.1,
+	.kd = 100,
+	.integral = 0,
+	.derror_prev = 0
+};
 
-	if (pterm > MAX_ERROR || pterm < -MAX_ERROR)
-	{
-		p->integral = 0;
-	}
-	else
-	{
-		p->integral += p->ki * ferror;
-
-		if (p->integral > MAX_ERROR)
-		{
-			p->integral = MAX_ERROR;
-		}
-		else if (p->integral < -MAX_ERROR)
-		{
-			p->integral = 0;
-		}
-	}
-
-	dterm = p->kd * ((float)(error - p->error_prev));
-	result = pterm + p->integral + dterm;
-
-	p->error_prev = error;
-
-	return result;
-}
-
-void assert_failed(uint8_t *function, uint32_t line)
+/* Only the first 30 bits are significant @ 60Hz */
+static const uint32_t pdm_table_60hz[PDM_TABLE_SIZE] =
 {
-	while (1);
+	0x00000000, // 0000 0000 0000 0000 0000 0000 0000 0000
+	0x00000002, // 0000 0000 0000 0000 0000 0000 0000 0010
+	0x00008002, // 0000 0000 0000 0000 1000 0000 0000 0010
+	0x00100802, // 0000 0000 0001 0000 0000 1000 0000 0010
+	0x00808202, // 0000 0000 1000 0000 1000 0010 0000 0010
+	0x01042082, // 0000 0001 0000 0100 0010 0000 1000 0010
+	0x02108842, // 0000 0010 0001 0000 1000 1000 0100 0010
+	0x04444444, // 0000 0100 0100 0100 0100 0100 0100 0100
+	0x0888a222, // 0000 1000 1000 1000 1010 0010 0010 0010
+	0x09120925, // 0000 1001 0001 0010 0000 1001 0010 0101
+	0x0924a492, // 0000 1001 0010 0100 1010 0100 1001 0010
+	0x12521495, // 0001 0010 0101 0010 0001 0100 1001 0101
+	0x1294ca52, // 0001 0010 1001 0100 1100 1010 0101 0010
+	0x152a2955, // 0001 0101 0010 1010 0010 1001 0101 0101
+	0x15555554, // 0001 0101 0101 0101 0101 0101 0101 0100
+	0x15552aab, // 0001 0101 0101 0101 0010 1010 1010 1011
+	0x2aaad554, // 0010 1010 1010 1010 1101 0101 0101 0100
+	0x2aaaaaab, // 0010 1010 1010 1010 1010 1010 1010 1011
+	0x2ad5d6aa, // 0010 1010 1101 0101 1101 0110 1010 1010
+	0x2b5b2d6b, // 0010 1011 0101 1011 0010 1101 0110 1011
+	0x2dadeb6c, // 0010 1101 1010 1101 1110 1011 0110 1100
+	0x2db6b6dd, // 0010 1101 1011 0110 1011 0110 1101 1011
+	0x36ddf6dc, // 0011 0110 1101 1101 1111 0110 1101 1100
+	0x37775ddd, // 0011 0111 0111 0111 0101 1101 1101 1101
+	0x3bbbbbbb, // 0011 1011 1011 1011 1011 1011 1011 1011
+	0x3bdeef7b, // 0011 1011 1101 1110 1110 1111 0111 1011
+	0x3dfbdf7d, // 0011 1101 1111 1011 1101 1111 0111 1101
+	0x3f7f7dfd, // 0011 1111 0111 1111 0111 1101 1111 1101
+	0x3feff7fd, // 0011 1111 1110 1111 1111 0111 1111 1101
+	0x3fff7ffb, // 0011 1111 1111 1111 0111 1111 1111 1011
+	0x3ffffffb, // 0011 1111 1111 1111 1111 1111 1111 1011
+	0x3fffffff, // 0011 1111 1111 1111 1111 1111 1111 1111
+};
+
+static uint8_t pdm_index;
+static uint32_t pdm_bit_count;
+static uint32_t pdm_bit_slice;
+
+static inline void pdm_reset()
+{
+	pdm_bit_count = 0;
+	pdm_bit_slice = pdm_table_60hz[pdm_index];
 }
 
 /**
  * @brief  Retargets the C library printf function to the USART.
- * @param  None
- * @retval None
+ * @param  ch The character to print
+ * @retval The character printed
  */
-int outbyte(int ch) {
-	while (USART_GetFlagStatus(USART, USART_FLAG_TXE) == RESET);
-	USART_SendData(USART, (uint8_t)ch);
-	//while (USART_GetFlagStatus(USART, USART_FLAG_TC) == RESET);
+int outbyte(int ch)
+{
+	/* Enable USART TXE interrupt */
+	xQueueSendToBack(tprintf_queue, &ch, 0);
+	USART_ITConfig(USART1, USART_IT_TXE, ENABLE);
 	return ch;
+}
+
+static inline uint16_t spi_r16()
+{
+	/* Send data */
+	SPI->DR = 0;
+
+	/* Wait for data */
+	while ((SPI->SR & SPI_I2S_FLAG_RXNE) == 0);
+
+	/* Read data */
+	return SPI->DR;
 }
 
 /**
@@ -284,117 +338,105 @@ int main(void)
 
 inline void main_noreturn(void)
 {
-	RCC_Configuration();
-	GPIO_Configuration();
-	USART_Configuration();
-	tprintf("\r\n=== Toaster Reflow Oven ===\r\n");
-	EXTI_Configuration();
-	RTC_Configuration();
-	NVIC_Configuration();
-	SPI_Configuration();
-	TIM_Configuration();
-	tprintf("Init Complete.\r\n");
-	tprintf("Time (s),Temp (c)\r\n");
+	/* Create the blink task */
+	xTaskCreate(profile_task, (signed portCHAR *)"blink", configMINIMAL_STACK_SIZE , NULL, tskIDLE_PRIORITY + 1, &profile_task_handle);
+	assert_param(profile_task_handle);
+
+	/* Start the FreeRTOS scheduler */
+	vTaskStartScheduler();
+	assert_param(NULL);
 
 	while (1);
 }
 
+static inline void setup()
+{
+	setup_rcc();
+	setup_gpio();
+	setup_exti();
+	setup_rtc();
+	setup_timer();
+	setup_spi();
+	setup_usart();
+	setup_nvic();
+
+	tprintf("stm32_template\r\n");
+}
+
 /**
- * @brief  Configures the different system clocks.
+ * @brief  Configures the peripheral clocks
  * @param  None
  * @retval None
  */
-void RCC_Configuration(void)
+void setup_rcc(void)
 {
-	/* Enable APB1 clocks */
-	RCC_APB1PeriphClockCmd(
-		(LED_APB1 |
-			BTN_APB1 |
-			RTC_APB1 |
-			USART_APB1 |
+	/* Enable PWR clock */
+	RCC_APB1PeriphClockCmd(RCC_APB1Periph_PWR |
+			SSR_APB1 |
+			DEBOUNCE_TIMER_APB1 |
+			PROFILE_TIMER_APB1 |
+			LED_APB1 |
 			SPI_APB1 |
-			TIMER_APB1 |
-			OVN_PWM_APB1),
-		ENABLE);
+			RCC_APB1Periph_BKP, ENABLE);
 
-	/* Enable APB2 clocks */
-	RCC_APB2PeriphClockCmd(
-		(LED_APB2 |
-			BTN_APB2 |
-			RTC_APB2 |
-			USART_APB2 |
+	/* Enable GPIOA and GPIOC clock */
+	RCC_APB2PeriphClockCmd(SSR_APB2 |
+			RCC_APB2Periph_USART1 |
+			LED_APB2 |
 			SPI_APB2 |
-			TIMER_APB2 |
-			OVN_PWM_APB2),
-		ENABLE);
+			RCC_APB2Periph_AFIO, ENABLE);
 }
 
 /**
- * @brief  Configures the different GPIO ports.
+ * @brief  Configures the different GPIO ports
  * @param  None
  * @retval None
  */
-void GPIO_Configuration(void)
+void setup_gpio(void)
 {
-	GPIO_InitTypeDef GPIO_InitStructure;
+	GPIO_InitTypeDef gpio_init;
 
-	/* Configure LED pins */
-	GPIO_InitStructure.GPIO_Pin = LED_PIN_BLUE | LED_PIN_GREEN;
-	GPIO_InitStructure.GPIO_Mode = GPIO_Mode_Out_PP;
-	GPIO_InitStructure.GPIO_Speed = GPIO_Speed_10MHz;
-	GPIO_Init(LED_GPIO, &GPIO_InitStructure);
+	/* Configure UART tx pin */
+	gpio_init.GPIO_Pin = GPIO_Pin_9;
+	gpio_init.GPIO_Mode = GPIO_Mode_AF_PP;
+	gpio_init.GPIO_Speed = GPIO_Speed_50MHz;
+	GPIO_Init(GPIOA, &gpio_init);
 
-	/* Configure button pins */
-	GPIO_InitStructure.GPIO_Pin = BTN_PIN;
-	GPIO_InitStructure.GPIO_Mode = GPIO_Mode_IN_FLOATING;
-	GPIO_Init(BTN_GPIO, &GPIO_InitStructure);
+	/* Configure PC5 (ADC Channel15) as analog input */
+	gpio_init.GPIO_Pin = GPIO_Pin_8 | GPIO_Pin_9;
+	gpio_init.GPIO_Mode = GPIO_Mode_Out_PP;
+	gpio_init.GPIO_Speed = GPIO_Speed_50MHz;
+	GPIO_Init(GPIOC, &gpio_init);
 
-	/* Configure SPI pins */
-	/* Deactivate slave select */
+	/* Deactivate SPI chip select pin */
 	GPIO_WriteBit(SPI_GPIO, SPI_PIN_NSS, Bit_SET);
-	GPIO_InitStructure.GPIO_Pin = SPI_PIN_SCK | SPI_PIN_MISO;
-	GPIO_InitStructure.GPIO_Mode = GPIO_Mode_AF_PP;
-	GPIO_Init(SPI_GPIO, &GPIO_InitStructure);
-	GPIO_InitStructure.GPIO_Pin = SPI_PIN_NSS;
-	GPIO_InitStructure.GPIO_Mode = GPIO_Mode_Out_PP;
-	GPIO_Init(SPI_GPIO, &GPIO_InitStructure);
 
-	/* Configure the main PWM to control the oven */
-	GPIO_InitStructure.GPIO_Pin = OVN_PWM_PIN;
-	GPIO_InitStructure.GPIO_Speed = GPIO_Speed_50MHz;
-	GPIO_InitStructure.GPIO_Mode = GPIO_Mode_AF_PP;
-	GPIO_Init(OVN_PWM_GPIO, &GPIO_InitStructure);
+	/* Configure SPI clock and data pins */
+	gpio_init.GPIO_Pin = SPI_PIN_SCK | SPI_PIN_MISO;
+	gpio_init.GPIO_Mode = GPIO_Mode_AF_PP;
+	gpio_init.GPIO_Speed = GPIO_Speed_50MHz;
+	GPIO_Init(SPI_GPIO, &gpio_init);
 
-	/* Configure USART pins */
-	GPIO_InitStructure.GPIO_Pin = USART_PIN_TX;
-	GPIO_InitStructure.GPIO_Mode = GPIO_Mode_AF_PP;
-	GPIO_Init(USART_GPIO, &GPIO_InitStructure);
+	/* Configure SPI chip select pins */
+	gpio_init.GPIO_Pin = SPI_PIN_NSS;
+	gpio_init.GPIO_Mode = GPIO_Mode_Out_PP;
+	gpio_init.GPIO_Speed = GPIO_Speed_50MHz;
+	GPIO_Init(SPI_GPIO, &gpio_init);
 
-	/* Connect button EXTI Line to button GPIO pin */
-	GPIO_EXTILineConfig(BTN_PORT_SRC, BTN_PIN_SRC);
-}
+	/* Configure solid state relay pin */
+	gpio_init.GPIO_Pin = SSR_PIN;
+	gpio_init.GPIO_Mode = GPIO_Mode_Out_PP;
+	gpio_init.GPIO_Speed = GPIO_Speed_50MHz;
+	GPIO_Init(SSR_GPIO, &gpio_init);
 
-/**
- * @brief  Configures the USART.
- * @param  None
- * @retval None
- */
-void USART_Configuration(void)
-{
-	USART_InitTypeDef USART_InitStructure;
+	/* Configure button input floating */
+	gpio_init.GPIO_Pin = GPIO_Pin_0;
+	gpio_init.GPIO_Mode = GPIO_Mode_IN_FLOATING;
+	gpio_init.GPIO_Speed = GPIO_Speed_50MHz;
+	GPIO_Init(GPIOA, &gpio_init);
 
-	/* Configure the USART */
-	USART_InitStructure.USART_BaudRate = USART_BAUDRATE;
-	USART_InitStructure.USART_WordLength = USART_WORD_LEN;
-	USART_InitStructure.USART_StopBits = USART_STOP_BITS;
-	USART_InitStructure.USART_Parity = USART_PARITY;
-	USART_InitStructure.USART_HardwareFlowControl = USART_HW_FLOW;
-	USART_InitStructure.USART_Mode = USART_MODE;
-
-	USART_Init(USART, &USART_InitStructure);
-
-	/* Enable the USART */
-	USART_Cmd(USART, ENABLE);
+	/* Connect Button EXTI Line to Button GPIO Pin */
+	GPIO_EXTILineConfig(GPIO_PortSourceGPIOA, GPIO_PinSource0);
 }
 
 /**
@@ -402,15 +444,14 @@ void USART_Configuration(void)
   * @param  None
   * @retval None
   */
-void EXTI_Configuration(void)
+void setup_exti(void)
 {
 	EXTI_InitTypeDef EXTI_InitStructure;
 
-	/* Configure the external interrupt */
-	EXTI_ClearITPendingBit(BTN_EXTI_LINE);
-	EXTI_InitStructure.EXTI_Line = BTN_EXTI_LINE;
-	EXTI_InitStructure.EXTI_Mode = BTN_EXTI_MODE;
-	EXTI_InitStructure.EXTI_Trigger = BTN_EXTI_TRG;
+	EXTI_ClearITPendingBit(EXTI_Line0);
+	EXTI_InitStructure.EXTI_Line = EXTI_Line0;
+	EXTI_InitStructure.EXTI_Mode = EXTI_Mode_Interrupt;
+	EXTI_InitStructure.EXTI_Trigger = EXTI_Trigger_Rising_Falling;
 	EXTI_InitStructure.EXTI_LineCmd = ENABLE;
 	EXTI_Init(&EXTI_InitStructure);
 }
@@ -420,7 +461,7 @@ void EXTI_Configuration(void)
   * @param  None
   * @retval None
   */
-void RTC_Configuration(void)
+void setup_rtc(void)
 {
 	/* RTC clock source configuration ------------------------------------------*/
 	/* Allow access to BKP Domain */
@@ -447,27 +488,104 @@ void RTC_Configuration(void)
 	/* Wait for RTC APB registers synchronisation */
 	RTC_WaitForSynchro();
 
-	/* Set the RTC time base to 1 second */
+	/* Set the RTC time base to 1min */
 	RTC_SetPrescaler(32767);
 
 	/* Wait until last write operation on RTC registers has finished */
 	RTC_WaitForLastTask();
-
-	/* Enable the RTC Alarm interrupt */
-	//RTC_ITConfig(RTC_IT_ALR, ENABLE);
 
 	/* Wait until last write operation on RTC registers has finished */
 	RTC_WaitForLastTask();
 }
 
 /**
-  * @brief  Configure the nested vectored interrupt controller.
+  * @brief  Configures timer controller
   * @param  None
   * @retval None
   */
-void NVIC_Configuration(void)
+void setup_timer(void)
 {
-	NVIC_InitTypeDef NVIC_InitStructure;
+	TIM_TimeBaseInitTypeDef tim_init;
+
+	/* Configure debounce timer */
+	tim_init.TIM_Prescaler = DEBOUNCE_DELAY - 1;
+	tim_init.TIM_CounterMode = TIM_CounterMode_Up;
+	tim_init.TIM_Period = (SystemCoreClock / 1000 ) - 1;
+	tim_init.TIM_ClockDivision = 0;
+	TIM_TimeBaseInit(DEBOUNCE_TIMER, &tim_init);
+
+	/* Configure profile timer */
+	tim_init.TIM_Prescaler = 1000 - 1;
+	tim_init.TIM_CounterMode = TIM_CounterMode_Up;
+	tim_init.TIM_Period = (SystemCoreClock / 120 / 1000 ) - 1;
+	tim_init.TIM_ClockDivision = 0;
+	TIM_TimeBaseInit(PROFILE_TIMER, &tim_init);
+
+	/* Clear the debouce timer update pending bit */
+	TIM_ClearITPendingBit(PROFILE_TIMER, TIM_IT_Update);
+
+	/* Enable profile timer interrupt */
+	TIM_ITConfig(PROFILE_TIMER, TIM_IT_Update, ENABLE);
+
+	/* Enable the timer */
+	TIM_Cmd(PROFILE_TIMER, ENABLE);
+
+}
+
+/**
+  * @brief  Configures SPI controller
+  * @param  None
+  * @retval None
+  */
+void setup_spi(void)
+{
+	SPI_InitTypeDef spi_init;
+
+	/* SPI configuration */
+	spi_init.SPI_Direction = SPI_DIRECTION;
+	spi_init.SPI_Mode = SPI_MODE;
+	spi_init.SPI_DataSize = SPI_DATA_SIZE;
+	spi_init.SPI_CPOL = SPI_CLK_POL;
+	spi_init.SPI_CPHA = SPI_CLK_PHASE;
+	spi_init.SPI_NSS = SPI_SLAVE_MODE;
+	spi_init.SPI_BaudRatePrescaler = SPI_BaudRatePrescaler_8;
+	spi_init.SPI_FirstBit = SPI_FirstBit_MSB;
+
+	SPI_Init(SPI, &spi_init);
+
+	/* Enable SPI */
+	SPI_Cmd(SPI, ENABLE);
+}
+
+/**
+  * @brief  Configures USART controller
+  * @param  None
+  * @retval None
+  */
+void setup_usart(void)
+{
+	USART_InitTypeDef usart_init;
+
+	usart_init.USART_BaudRate = 115200;
+	usart_init.USART_WordLength = USART_WordLength_8b;
+	usart_init.USART_StopBits = 1;
+	usart_init.USART_Parity = USART_Parity_No;
+	usart_init.USART_HardwareFlowControl = USART_HardwareFlowControl_None;
+	usart_init.USART_Mode = USART_Mode_Tx;
+	USART_Init(USART1, &usart_init);
+
+	/* Enable the USART */
+	USART_Cmd(USART1, ENABLE);
+}
+
+/**
+  * @brief  Configure the nested vectored interrupt controller
+  * @param  None
+  * @retval None
+  */
+void setup_nvic(void)
+{
+	NVIC_InitTypeDef nvic_init;
 
 	/* Set the Vector Table base address as specified in .ld file */
 	NVIC_SetVectorTable(NVIC_VectTab_FLASH, 0x0);
@@ -478,118 +596,57 @@ void NVIC_Configuration(void)
 	/* Configure HCLK clock as SysTick clock source. */
 	SysTick_CLKSourceConfig(SysTick_CLKSource_HCLK);
 
-	/* Enable RTC interrupt */
-	NVIC_InitStructure.NVIC_IRQChannel = RTC_IRQn;
-	NVIC_InitStructure.NVIC_IRQChannelPreemptionPriority = 0x2;
-	NVIC_InitStructure.NVIC_IRQChannelSubPriority = 0;
-	NVIC_InitStructure.NVIC_IRQChannelCmd = ENABLE;
-	NVIC_Init(&NVIC_InitStructure);
+	/* Configure USART interrupt */
+	nvic_init.NVIC_IRQChannel = USART1_IRQn;
+	nvic_init.NVIC_IRQChannelPreemptionPriority = 0xf;
+	nvic_init.NVIC_IRQChannelCmd = ENABLE;
+	NVIC_Init(&nvic_init);
 
-	/* Enable button EXTI interrupt */
-	NVIC_InitStructure.NVIC_IRQChannel = BTN_IRQ;
-	NVIC_InitStructure.NVIC_IRQChannelPreemptionPriority = 0xf;
-	NVIC_InitStructure.NVIC_IRQChannelCmd = ENABLE;
-	NVIC_Init(&NVIC_InitStructure);
+	/* Configure RTC interrupt */
+	nvic_init.NVIC_IRQChannel = RTC_IRQn;
+	nvic_init.NVIC_IRQChannelPreemptionPriority = 0xe;
+	nvic_init.NVIC_IRQChannelCmd = ENABLE;
+	NVIC_Init(&nvic_init);
 
-	/* Enable and set SPI interrupt */
-	NVIC_InitStructure.NVIC_IRQChannel = SPI_IRQ;
-	NVIC_InitStructure.NVIC_IRQChannelPreemptionPriority = 0x0;
-	NVIC_InitStructure.NVIC_IRQChannelCmd = ENABLE;
-	NVIC_Init(&NVIC_InitStructure);
+	/* Configure debounce timer interrupt */
+	nvic_init.NVIC_IRQChannel = DEBOUNCE_TIMER_IRQ;
+	nvic_init.NVIC_IRQChannelPreemptionPriority = 0xc;
+	nvic_init.NVIC_IRQChannelCmd = ENABLE;
+	NVIC_Init(&nvic_init);
 
-	/* Enable timer interrupt */
-	NVIC_InitStructure.NVIC_IRQChannel = TIMER_IRQ;
-	NVIC_InitStructure.NVIC_IRQChannelPreemptionPriority = 0x1;
-	NVIC_InitStructure.NVIC_IRQChannelCmd = ENABLE;
-	NVIC_Init(&NVIC_InitStructure);
+	/* Configure profile timer interrupt */
+	nvic_init.NVIC_IRQChannel = PROFILE_TIMER_IRQ;
+	nvic_init.NVIC_IRQChannelPreemptionPriority = 0xd;
+	nvic_init.NVIC_IRQChannelCmd = ENABLE;
+	NVIC_Init(&nvic_init);
+
+	/* Configure EXTI interrupt */
+	nvic_init.NVIC_IRQChannel = EXTI0_IRQn;
+	nvic_init.NVIC_IRQChannelPreemptionPriority = 0x1;
+	nvic_init.NVIC_IRQChannelCmd = ENABLE;
+	NVIC_Init(&nvic_init);
 }
 
 /**
-  * @brief  Configure the SPI controller.
+  * @brief  This function handles USART interrupt request.
   * @param  None
   * @retval None
   */
-void SPI_Configuration(void)
+void usart1_isr(void)
 {
-	SPI_InitTypeDef SPI_InitStructure;
+	portBASE_TYPE task_woken;
 
-	/* Configure SPI controller */
-	SPI_InitStructure.SPI_Direction = SPI_DIRECTION;
-	SPI_InitStructure.SPI_Mode = SPI_MODE;
-	SPI_InitStructure.SPI_DataSize = SPI_DATA_SIZE;
-	SPI_InitStructure.SPI_CPOL = SPI_CLK_POL;
-	SPI_InitStructure.SPI_CPHA = SPI_CLK_PHASE;
-	SPI_InitStructure.SPI_NSS = SPI_SLAVE_MODE;
-	SPI_InitStructure.SPI_BaudRatePrescaler = SPI_BaudRatePrescaler_4;
-	SPI_InitStructure.SPI_FirstBit = SPI_FirstBit_MSB;
-	SPI_InitStructure.SPI_CRCPolynomial = 7;
-	SPI_Init(SPI, &SPI_InitStructure);
-
-	/* Enable SPI interrupt */
-	SPI_I2S_ITConfig(SPI, SPI_I2S_IT_RXNE, ENABLE);
-
-	/* Enable SPI */
-	SPI_Cmd(SPI, ENABLE);
-}
-
-/**
-  * @brief  Configure the timer controller.
-  * @param  None
-  * @retval None
-  */
-void TIM_Configuration(void)
-{
-	TIM_TimeBaseInitTypeDef  TIM_TimeBaseStructure;
-	TIM_OCInitTypeDef TIM_OCInitStructure;
-
-	/* Configure timer */
-	TIM_TimeBaseStructure.TIM_Prescaler = 0;
-	TIM_TimeBaseStructure.TIM_CounterMode = TIM_CounterMode_Up;
-	TIM_TimeBaseStructure.TIM_Period = (SystemCoreClock / 1000 ) - 1;
-	TIM_TimeBaseStructure.TIM_ClockDivision = 0;
-	TIM_TimeBaseStructure.TIM_RepetitionCounter = 2;
-	TIM_TimeBaseInit(TIMER, &TIM_TimeBaseStructure);
-
-	/* Set Period */
-	TIM_TimeBaseStructure.TIM_Prescaler = (SystemCoreClock / 2000) - 1;
-	TIM_TimeBaseStructure.TIM_Period = 1000;
-	TIM_TimeBaseStructure.TIM_ClockDivision = 0;
-	TIM_TimeBaseStructure.TIM_CounterMode = TIM_CounterMode_CenterAligned1;
-	TIM_TimeBaseInit(OVN_PWM_TIM, &TIM_TimeBaseStructure);
-
-	/* Enable timer counter */
-	TIM_Cmd(TIMER, ENABLE);
-
-	/* Set Duty Cycle */
-	TIM_OCInitStructure.TIM_OCMode = TIM_OCMode_PWM1;
-	TIM_OCInitStructure.TIM_OutputState = TIM_OutputState_Enable;
-	TIM_OCInitStructure.TIM_Pulse = 0;
-	TIM_OCInitStructure.TIM_OCPolarity = TIM_OCPolarity_High;
-	TIM_OC1Init(OVN_PWM_TIM, &TIM_OCInitStructure);
-
-	/* Enable oven PWM timer */
-	TIM_OC1PreloadConfig(OVN_PWM_TIM, TIM_OCPreload_Enable);
-	TIM_ARRPreloadConfig(OVN_PWM_TIM, ENABLE);
-	TIM_Cmd(OVN_PWM_TIM, ENABLE);
-}
-
-/**
-  * @brief  This function handles External line 0 interrupt request.
-  * @param  None
-  * @retval None
-  */
-void EXTI0_IRQHandler(void)
-{
-	/* Clear the Key Button EXTI line pending bit */
-	EXTI_ClearITPendingBit(EXTI_Line0);
-
-	if (!debounce)
+	if (USART_GetITStatus(USART1, USART_IT_TXE) != RESET)
 	{
-		debounce = DEBOUNCE_DELAY;
+		unsigned char ch;
 
-		/* Enable timer interrupt */
-		TIM_ITConfig(TIMER, TIM_IT_Update, ENABLE);
+		if (xQueueReceiveFromISR(tprintf_queue, &ch, &task_woken))
+			USART_SendData(USART1, ch);
+		else
+			USART_ITConfig(USART1, USART_IT_TXE, DISABLE);
 	}
+
+	portEND_SWITCHING_ISR(task_woken);
 }
 
 /**
@@ -597,21 +654,19 @@ void EXTI0_IRQHandler(void)
   * @param  None
   * @retval None
   */
-void RTC_IRQHandler(void)
+void rtc_isr(void)
 {
 	if(RTC_GetITStatus(RTC_IT_SEC) != RESET)
 	{
 		uint32_t counter = RTC_GetCounter();
-
-		/* Toggle blue LED */
-		GPIO_WriteBit(LED_GPIO, LED_PIN_BLUE, oven.led_blue);
-		oven.led_blue ^= 1;
 
 		/* Wait until last write operation on RTC registers has finished */
 		RTC_WaitForLastTask();
 
 		/* Clear RTC Alarm interrupt pending bit */
 		RTC_ClearITPendingBit(RTC_IT_SEC);
+
+		blink_toggle_green();
 
 		/* Reset RTC Counter when Time is 23:59:59 */
 		if (counter == 0x00015180)
@@ -624,121 +679,197 @@ void RTC_IRQHandler(void)
 }
 
 /**
-  * @brief  This function handles SPI interrupt request.
+  * @brief  This function handles timer interrupt request
   * @param  None
   * @retval None
   */
-void SPI2_IRQHandler(void)
+void tim4_isr(void)
 {
-	uint16_t data;
+	volatile uint8_t button = GPIO_ReadInputDataBit(GPIOA, GPIO_Pin_0);
 
-	/* Deactivate slave select */
-	GPIO_WriteBit(SPI_GPIO, SPI_PIN_NSS, Bit_SET);
-
-	/* Get SPI data */
-	data = SPI_I2S_ReceiveData(SPI);
-	//tprintf("0x%x\r\n", data);
-
-	/* Set thermocouple data */
-	oven.tc.temp_prev = oven.tc.temp;
-	oven.tc.temp = ((data & MAX6675_MASK_TC_TEMP) >> 3) >> 2;
-	oven.tc.open = ((data & MAX6675_MASK_TC_INPUT) >> 2);
-
-	if (oven.tc.open)
+	if (button_state == BUTTON_STATE_UP && button)
 	{
-		toaster_off();
-		tprintf("Thermocouple is open!\r\n");
+		button_state = BUTTON_STATE_DOWN;
+		tprintf("button press\r\n");
+		vTaskResume(profile_task_handle);
+	}
+	else if (button_state == BUTTON_STATE_DOWN && !button)
+	{
+		button_state = BUTTON_STATE_UP;
+		tprintf("button release\r\n");
+	}
+
+	/* Clear the debouce timer update pending bit */
+	TIM_ClearITPendingBit(DEBOUNCE_TIMER, TIM_IT_Update);
+
+	/* Disable the timer */
+	TIM_Cmd(DEBOUNCE_TIMER, DISABLE);
+
+	debounce = 0;
+}
+
+/**
+  * @brief  This function handles timer interrupt request
+  * @param  None
+  * @retval None
+  */
+void tim2_isr(void)
+{
+	static signed portBASE_TYPE task_woken;
+	uint32_t slice = pdm_bit_slice;
+
+	/* Clear the profile timer update pending bit */
+	TIM_ClearITPendingBit(PROFILE_TIMER, TIM_IT_Update);
+
+	if (++pdm_bit_count >= PDM_NUM_BITS)
+	{
+		volatile uint16_t data;
+
+		/* Read thermocouple temperature */
+		SPI_GPIO->BRR = SPI_PIN_NSS;
+		data = spi_r16();
+		SPI_GPIO->BSRR = SPI_PIN_NSS;
+
+		oven.tc.temp = ((data & MAX6675_MASK_TC_TEMP) >> 3) >> 2;
+		toaster_update();
+
+		oven.elapsed_total += 250;
+		oven.counter += 250;
+		pdm_reset();
+
+		xSemaphoreGiveFromISR(debug_sem, &task_woken);
 	}
 	else
 	{
-		tprintf("%d,%d\r\n", oven.elapsed, oven.tc.temp);
+		pdm_bit_slice >>= 1;
+	}
 
-		switch (oven.state)
+	if (profile.running && (slice & 0x1))
+		SSR_GPIO->BSRR = SSR_PIN;
+	else
+		SSR_GPIO->BRR = SSR_PIN;
+
+	portEND_SWITCHING_ISR(task_woken);
+}
+
+/**
+  * @brief  This function handles External line 0 interrupt request.
+  * @param  None
+  * @retval None
+  */
+void exti0_isr(void)
+{
+	/* Clear pending bit */
+	EXTI_ClearITPendingBit(EXTI_Line0);
+
+	/* Disable timer interrupt */
+	TIM_ITConfig(DEBOUNCE_TIMER, TIM_IT_Update, DISABLE);
+
+	/* Reset timer counter */
+	TIM_SetCounter(DEBOUNCE_TIMER, 0);
+
+	/* Clear the debouce timer update pending bit */
+	TIM_ClearITPendingBit(DEBOUNCE_TIMER, TIM_IT_Update);
+
+	/* Enable timer interrupt */
+	TIM_ITConfig(DEBOUNCE_TIMER, TIM_IT_Update, ENABLE);
+
+	if (!debounce)
+	{
+		debounce = 1;
+
+		/* Enable the timer */
+		TIM_Cmd(DEBOUNCE_TIMER, ENABLE);
+	}
+}
+
+void blink_toggle_green()
+{
+	oven.led_green ^= 1;
+	GPIO_WriteBit(LED_GPIO, LED_PIN_GREEN, oven.led_green);
+}
+
+void profile_task(void *pvParameters)
+{
+	xTaskHandle task_handle;
+
+	/*
+	 * If using FreeRTOS, tprintf must not be called until after this queue
+	 * has been created
+	 */
+	tprintf_queue = xQueueCreate(TPRINTF_QUEUE_SIZE, sizeof(unsigned char));
+	assert_param(tprintf_queue);
+
+	vSemaphoreCreateBinary(debug_sem);
+	assert_param(debug_sem);
+
+	/* Create the debug task */
+	xTaskCreate(debug_task, (signed portCHAR *)"debug", configMINIMAL_STACK_SIZE , NULL, tskIDLE_PRIORITY + 1, &task_handle);
+	assert_param(task_handle);
+
+	setup();
+
+	for (;;)
+	{
+		vTaskSuspend(NULL);
+
+		if (!profile.running)
 		{
-			case OFF:
-				break;
-			case WARMUP:
-			{
-				toaster_warmup();
-			} break;
-			case PREHEAT_RAMPUP:
-			case PREHEAT:
-			{
-				toaster_preheat();
-			} break;
+			profile.running = 1;
+			toaster_warmup();
+		}
+		else
+		{
+			profile.running = 0;
+			toaster_off();
+		}
+	}
+}
 
-			case REFLOW_RAMPUP:
-			case REFLOW:
-			{
-				toaster_reflow();
-			} break;
+void debug_task(void *pvParameters)
+{
+	static uint32_t prev_total = 0xffffffff;
 
-			case COOLDOWN:
-			{
-				toaster_cooldown();
-			} break;
-
-			default:
-			{
-				toaster_off();
-				tprintf("Invalid state! %d\r\n", oven.state);
-			} break;
+	for (;;)
+	{
+		xSemaphoreTake(debug_sem, 250);
+		if (oven.tc.temp > 0 && oven.elapsed_total != prev_total)
+		{
+			tprintf("pdm=%08x\r\n", pdm_bit_slice);
+			tprintf(":%d,%d\r\n", oven.elapsed_total - 250, oven.tc.temp);
+			prev_total = oven.elapsed_total;
 		}
 	}
 }
 
 /**
-  * @brief  This function handles timer interrupt request.
-  * @param  None
-  * @retval None
+  * @brief  PID in C, Error computed inside the routine
+  * @param : Input (measured value)
+  *   Ref: reference (target value)
+  *   Coeff: pointer to the coefficient table
+  * @retval : PID output (command)
   */
-void TIM7_IRQHandler(void)
+int pid_calc(int error, struct pid_params *p, float derror)
 {
-	/* Clear the timer update pending bit */
-	TIM_ClearITPendingBit(TIMER, TIM_IT_Update);
+	float ferror = (float)error;
+	float pterm;
+	float iterm;
+	float dterm;
 
-	if (!debounce)
-	{
-		oven.elapsed++;
-		oven.counter++;
+	pterm = p->kp * ferror;
+	p->integral += ferror;
 
-		if ((oven.elapsed % 250) == 0)
-		{
-			/* Activate slave select */
-			GPIO_WriteBit(SPI_GPIO, SPI_PIN_NSS, Bit_RESET);
+	if (p->integral > MAX_ERROR)
+		p->integral = MAX_ERROR;
+	else if (p->integral < MIN_ERROR)
+		p->integral = 0;
 
-			/* Start temperature read */
-			SPI_I2S_SendData(SPI, 0);
-		}
-	}
-	else
-	{
-		debounce--;
+	iterm = p->ki * p->integral;
+	dterm = p->kd * (derror - p->derror_prev);
 
-		if (!debounce)
-		{
-			if (GPIO_ReadInputDataBit(BTN_GPIO, BTN_PIN) == RESET)
-			{
-				switch (oven.state)
-				{
-					case OFF:
-					{
-						toaster_warmup();
-					} break;
+	p->derror_prev = derror;
 
-					default:
-					{
-						toaster_off();
-					} break;
-				}
-			}
-			else /* False positive */
-			{
-				/* Disable timer interrupt */
-				TIM_ITConfig(TIMER, TIM_IT_Update, DISABLE);
-			}
-		}
-	}
+	return (int)(pterm + iterm - dterm);
 }
 
 void toaster_goto(enum thermal_state state)
@@ -747,41 +878,55 @@ void toaster_goto(enum thermal_state state)
 	{
 		case OFF:
 		{
+			oven.output = 0;
 			tprintf(">OFF\r\n");
 		} break;
 
 		case WARMUP:
 		{
+			oven.output = profile.warmup_output;
+			oven.elapsed_warmup = oven.counter;
 			tprintf(">WARMUP\r\n");
-		} break;
-
-		case PREHEAT_RAMPUP:
-		{
-			tprintf(">PREHEAT_RAMPUP\r\n");
 		} break;
 
 		case PREHEAT:
 		{
+			oven.output = profile.soak_temp;
+			oven.elapsed_preheat = oven.counter;
 			tprintf(">PREHEAT\r\n");
 		} break;
 
-		case REFLOW_RAMPUP:
+		case SOAK:
 		{
-			tprintf(">REFLOW_RAMPUP\r\n");
+			oven.output = profile.soak_temp;
+			oven.elapsed_soak = oven.counter;
+			tprintf(">SOAK\r\n");
+		} break;
+
+		case RAMPUP:
+		{
+			oven.output = profile.reflow_temp;
+			oven.elapsed_reflow_rampup = oven.counter;
+			tprintf(">RAMPUP\r\n");
 		} break;
 
 		case REFLOW:
 		{
+			oven.output = profile.reflow_temp;
+			oven.elapsed_reflow = oven.counter;
 			tprintf(">REFLOW\r\n");
 		} break;
 
 		case COOLDOWN:
 		{
+			oven.output = 0;
+			oven.elapsed_cooldown = oven.counter;
 			tprintf(">COOLDOWN\r\n");
 		} break;
 
 		default:
 		{
+			oven.output = 0;
 			tprintf("Invalid state!\r\n");
 			toaster_off();
 		} return;
@@ -791,16 +936,41 @@ void toaster_goto(enum thermal_state state)
 	oven.state = state;
 }
 
+void toaster_update()
+{
+	switch (oven.state)
+	{
+		case WARMUP:
+			toaster_warmup();
+			break;
+
+		case PREHEAT:
+		case SOAK:
+			toaster_soak();
+			break;
+
+		case RAMPUP:
+		case REFLOW:
+			toaster_reflow();
+			break;
+
+		case COOLDOWN:
+			toaster_cooldown();
+			break;
+
+		default:
+			break;
+	}
+}
+
 void toaster_off()
 {
-	/* Disable timer interrupt */
-	TIM_ITConfig(TIMER, TIM_IT_Update, DISABLE);
-
 	/* Disable the RTC second interrupt */
 	RTC_ITConfig(RTC_IT_SEC, DISABLE);
 
 	/* Turn off green LED */
 	GPIO_WriteBit(LED_GPIO, LED_PIN_GREEN, Bit_RESET);
+	oven.led_green = 0;
 
 	/* Turn off blue LED */
 	GPIO_WriteBit(LED_GPIO, LED_PIN_BLUE, Bit_RESET);
@@ -810,6 +980,12 @@ void toaster_off()
 	toaster_set_output(0);
 
 	toaster_goto(OFF);
+
+	tprintf("Reflow process complete\r\n");
+	tprintf("Total time elapsed: %d\r\n", oven.elapsed_total);
+	tprintf("Max temp reached: %d\r\n", oven.max_temp_reached);
+	tprintf("Soak reached: %d\r\n", oven.soak_reached);
+	tprintf("Reflow reached: %d\r\n", oven.reflow_reached);
 }
 
 void toaster_warmup()
@@ -817,58 +993,61 @@ void toaster_warmup()
 	if (oven.state != WARMUP)
 	{
 		/* Reset toaster variables */
-		oven.elapsed = 0;
-		oven.max_preheat_reached = 0;
-		oven.max_reflow_reached = 0;
+		oven.elapsed_total = 0;
+		oven.elapsed_warmup = 0;
+		oven.elapsed_preheat = 0;
+		oven.elapsed_soak = 0;
+		oven.elapsed_reflow_rampup = 0;
+		oven.elapsed_reflow = 0;
+		oven.elapsed_cooldown = 0;
+		oven.max_temp_reached = 0;
+		oven.soak_reached = 0;
+		oven.reflow_reached = 0;
 
 		/* Update state */
 		toaster_goto(WARMUP);
 
 		/* Turn on green LED */
 		GPIO_WriteBit(LED_GPIO, LED_PIN_GREEN, Bit_SET);
+		oven.led_green = 1;
+
+		/* Turn on blue LED */
+		GPIO_WriteBit(LED_GPIO, LED_PIN_BLUE, Bit_SET);
+		oven.led_blue = 1;
 
 		/* Enable the RTC second interrupt */
 		RTC_ITConfig(RTC_IT_SEC, ENABLE);
 
-		toaster_set_output(profile.warmup_output);
+		pdm_reset();
+
+		toaster_set_output(oven.output);
 	}
 
-	if (oven.tc.temp >= profile.warmup_temp_min)
+	if (oven.tc.temp >= profile.warmup_temp)
 	{
-		toaster_preheat();
+		toaster_soak();
 	}
 }
 
-void toaster_preheat()
+void toaster_soak()
 {
 	if (oven.state == WARMUP)
 	{
-		toaster_goto(PREHEAT_RAMPUP);
-	}
-	else if (oven.state == PREHEAT_RAMPUP)
-	{
-		if (oven.tc.temp >= profile.preheat_temp_min)
-		{
-			toaster_goto(PREHEAT);
-		}
-		else if (oven.counter >= profile.preheat_time_max)
-		{
-#ifdef TEST_PREHEAT
-			toaster_off();
-#else
-			toaster_reflow();
-#endif
-		}
+		toaster_goto(PREHEAT);
 	}
 	else if (oven.state == PREHEAT)
 	{
-		if (oven.counter >= profile.preheat_time_max)
+		if (oven.tc.temp >= (profile.soak_temp - OVN_TEMP_TOLERANCE))
 		{
-#ifdef TEST_PREHEAT
-			toaster_off();
-#else
+			oven.soak_reached = 1;
+			toaster_goto(SOAK);
+		}
+	}
+	else if (oven.state == SOAK)
+	{
+		if (oven.counter >= profile.soak_time)
+		{
 			toaster_reflow();
-#endif
 		}
 	}
 	else
@@ -877,35 +1056,29 @@ void toaster_preheat()
 		tprintf("Invalid state!\r\n");
 	}
 
-	if (oven.state == PREHEAT_RAMPUP || oven.state == PREHEAT)
+	if (oven.state == PREHEAT || oven.state == SOAK)
 	{
-#ifdef TEST_PREHEAT
-		oven.output = TEST_PREHEAT;
-#endif
-		toaster_set_output(pid_calc(oven.output - oven.tc.temp, &pid));
+		toaster_set_output(pid_calc(profile.soak_temp - oven.tc.temp, &soak_pid, oven.tc.temp));
 	}
 }
 
 void toaster_reflow()
 {
-	if ((oven.state == PREHEAT) || (oven.state == PREHEAT_RAMPUP))
+	if ((oven.state == SOAK) || (oven.state == PREHEAT))
 	{
-		toaster_goto(REFLOW_RAMPUP);
+		toaster_goto(RAMPUP);
 	}
-	else if (oven.state != REFLOW_RAMPUP)
+	else if (oven.state == RAMPUP)
 	{
-		if (oven.tc.temp >= profile.reflow_temp_min)
+		if (oven.tc.temp >= (profile.reflow_temp - OVN_TEMP_TOLERANCE))
 		{
+			oven.reflow_reached = 1;
 			toaster_goto(REFLOW);
 		}
-		else if (oven.counter >= profile.reflow_time_max)
-		{
-			toaster_cooldown();
-		}
 	}
-	else if (oven.state != REFLOW)
+	else if (oven.state == REFLOW)
 	{
-		if (oven.counter >= profile.reflow_time_max)
+		if (oven.counter >= profile.reflow_time)
 		{
 			toaster_cooldown();
 		}
@@ -914,6 +1087,11 @@ void toaster_reflow()
 	{
 		toaster_off();
 		tprintf("Invalid state!\r\n");
+	}
+
+	if (oven.state == RAMPUP || oven.state == REFLOW)
+	{
+		toaster_set_output(pid_calc(profile.reflow_temp - (float)oven.tc.temp, &reflow_pid, oven.tc.temp));
 	}
 }
 
@@ -924,11 +1102,12 @@ void toaster_cooldown()
 		if (oven.state != COOLDOWN)
 		{
 			toaster_goto(COOLDOWN);
+			toaster_set_output(oven.output);
 		}
 		else
 		{
-			if (oven.tc.temp <= profile.cooldown_temp_min ||
-				oven.counter >= profile.cooldown_time_max)
+			if (oven.tc.temp <= profile.cooldown_temp ||
+				oven.counter >= profile.cooldown_time)
 			{
 				toaster_off();
 			}
@@ -938,23 +1117,21 @@ void toaster_cooldown()
 
 void toaster_set_output(int output)
 {
-	uint8_t duty;
-
+#ifndef DISABLE_OVEN
 	if (output > MAX_OUTPUT)
 	{
-		duty = MAX_OUTPUT;
+		pdm_index = MAX_OUTPUT;
 	}
 	else if (output < 0)
 	{
-		duty = 0;
+		pdm_index = 0;
 	}
 	else
 	{
-		duty = (uint8_t)output;
+		pdm_index = (uint8_t)output;
 	}
 
 	tprintf("output=%d\r\n", output);
-	tprintf("duty=%d%%\r\n", duty);
-
-	TIM_SetCompare1(OVN_PWM_TIM, duty * 10);
+	tprintf("index=%d\r\n", pdm_index);
+#endif
 }
