@@ -46,5 +46,7 @@
 
 #define NORETURN __attribute__((noreturn))
 
+#define assert_break() do { if (CoreDebug->DHCSR & 1) { __asm volatile("bkpt 0"); } while(1); } while (0)
+
 #endif /* COMMON_H */
 

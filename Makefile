@@ -46,11 +46,11 @@ USE_THUMB_MODE = YES
 # - MODEL used for linker-script name (-T) and passed as define
 # - BOARD just passed as define (optional)
 MCU      = cortex-m3
-CHIP     = stm32f100rb
-MODEL    = md_vl
+CHIP     = stm32f103vc
+MODEL    = hd
 BOARD    = STM32Discovery
 F_XTAL   = 8000000
-SYSCLOCK_CL = SYSCLK_FREQ_24MHz=24000000
+SYSCLOCK_CL = SYSCLK_FREQ_72MHz=72000000
 STACK_SIZE ?= 1024
 
 # Directory for output files (lst, obj, dep, elf, sym, map, hex, bin etc.)
@@ -79,6 +79,8 @@ endif
 
 ## MAIN:
 SRC = main.c
+SRC += ssd2119.c
+SRC += display.c
 
 ## COMMON:
 ifeq ($(DEBUG),YES)
@@ -101,6 +103,7 @@ SRC += $(STMSPDSRCDIR)/stm32f10x_bkp.c
 #SRC += $(STMSPDSRCDIR)/stm32f10x_dma.c
 SRC += $(STMSPDSRCDIR)/stm32f10x_exti.c
 #SRC += $(STMSPDSRCDIR)/stm32f10x_flash.c
+SRC += $(STMSPDSRCDIR)/stm32f10x_fsmc.c
 SRC += $(STMSPDSRCDIR)/stm32f10x_gpio.c
 #SRC += $(STMSPDSRCDIR)/stm32f10x_i2c.c
 SRC += $(STMSPDSRCDIR)/stm32f10x_pwr.c
@@ -203,6 +206,7 @@ endif
 ifneq ($(RTOS),)
 CDEFS += -D$(RTOS)
 endif
+CDEFS += -DCONFIG_DISPLAY_CFAF320240F
 
 # Optimization level, can be [0, 1, 2, 3, s].
 # 0 = turn off optimization. s = optimize for size.

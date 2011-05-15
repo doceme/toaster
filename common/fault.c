@@ -5,6 +5,7 @@
  *
  */
 #include "stm32f10x.h"
+#include "common.h"
 
 void mem_manage_handler(void) __attribute__((naked));
 void bus_fault_handler(void) __attribute__ ((naked));
@@ -20,8 +21,6 @@ struct stack_t {
 	uint32_t pc;
 	uint32_t psr;
 };
-
-#define assert_break() do { if (CoreDebug->DHCSR & 1) { __asm volatile("bkpt 0"); } while(1); } while (0)
 
 void assert_failed(uint8_t *function, uint32_t line)
 {
