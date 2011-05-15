@@ -38,7 +38,14 @@
 #include <semphr.h>
 #endif
 
-#define delay_ms vTaskDelay
+#define delay_ms	vTaskDelay
+
+#define BACKLIGHT_TIMER				TIM2
+#define BACKLIGHT_APB1				RCC_APB1Periph_TIM2
+#define BACKLIGHT_APB2				RCC_APB2Periph_GPIOB
+#define backlight_timer_oc_init			TIM_OC3Init
+#define backlight_timer_oc_preload_config	TIM_OC3PreloadConfig
+#define backlight_timer_set_compare		TIM_SetCompare3
 
 const struct display_panel display =
 {
@@ -67,6 +74,40 @@ static const struct display_rect screen_rect =
 	.x2 = DISPLAY_PIXEL_WIDTH - 1,
 	.y2 = DISPLAY_PIXEL_HEIGHT - 1
 };
+
+void setup_timer(void)
+{
+	TIM_TimeBaseInitTypeDef  timer_init;
+	TIM_OCInitTypeDef timer_ocinit;
+
+	/* Set Period */
+	timer_init.TIM_Prescaler = (SystemCoreClock / 1000000) - 1;
+	timer_init.TIM_Period = 100;
+	timer_init.TIM_ClockDivision = 0;
+	timer_init.TIM_CounterMode = TIM_CounterMode_CenterAligned1;
+	TIM_TimeBaseInit(BACKLIGHT_TIMER, &timer_init);
+
+	/* Set Duty Cycle */
+	timer_ocinit.TIM_OCMode = TIM_OCMode_PWM1;
+	timer_ocinit.TIM_OutputState = TIM_OutputState_Enable;
+	timer_ocinit.TIM_Pulse = 0;
+	timer_ocinit.TIM_OCPolarity = TIM_OCPolarity_High;
+	backlight_timer_oc_init(BACKLIGHT_TIMER, &timer_ocinit);
+
+	/* Enable oven PWM timer */
+	backlight_timer_oc_preload_config(BACKLIGHT_TIMER, TIM_OCPreload_Enable);
+	TIM_ARRPreloadConfig(BACKLIGHT_TIMER, ENABLE);
+	TIM_Cmd(BACKLIGHT_TIMER, ENABLE);
+}
+
+int display_set_backlight(uint8_t percent)
+{
+	if (percent > 100)
+		percent = 100;
+
+	backlight_timer_set_compare(BACKLIGHT_TIMER, percent);
+	return 0;
+}
 
 static int display_goto(uint16_t x, uint16_t y)
 {
@@ -155,6 +196,21 @@ static int display_exec_op(const struct display_op *op)
 
 int display_init(void)
 {
+	GPIO_InitTypeDef gpio_init;
+
+	/* Enable PWR clock */
+	RCC_APB1PeriphClockCmd(BACKLIGHT_APB1, ENABLE);
+	RCC_APB2PeriphClockCmd(BACKLIGHT_APB2, ENABLE);
+
+	/* Configure LCD backlight pin */
+	gpio_init.GPIO_Pin = GPIO_Pin_10;
+	gpio_init.GPIO_Mode = GPIO_Mode_AF_PP;
+	gpio_init.GPIO_Speed = GPIO_Speed_50MHz;
+	GPIO_Init(GPIOB, &gpio_init);
+	GPIO_PinRemapConfig(GPIO_FullRemap_TIM2, ENABLE);
+
+	setup_timer();
+
 	if (display.ctl_init)
 		display.ctl_init();
 

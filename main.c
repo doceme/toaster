@@ -42,9 +42,6 @@
 #define DEBOUNCE_DELAY		40
 #define TPRINTF_QUEUE_SIZE	256
 
-#define PWM_TIMER	TIM2
-#define PWM_APB1	RCC_APB1Periph_TIM2
-
 #define SPI		SPI1
 #define SPI_IRQ		SPI1_IRQn
 #define SPI_APB1	0
@@ -67,7 +64,6 @@ static void setup_gpio(void);
 static void setup_exti(void);
 #endif
 static void setup_rtc(void);
-static void setup_timer(void);
 static void setup_usart(void);
 static void setup_spi(void);
 static void setup_nvic(void);
@@ -153,7 +149,6 @@ static inline void setup()
 	setup_exti();
 #endif
 	setup_rtc();
-	setup_timer();
 	setup_usart();
 	setup_spi();
 	setup_nvic();
@@ -170,7 +165,6 @@ void setup_rcc(void)
 {
 	/* Enable PWR clock */
 	RCC_APB1PeriphClockCmd(RCC_APB1Periph_PWR |
-			PWM_APB1 |
 			SPI_APB1 |
 			RCC_APB1Periph_BKP, ENABLE);
 
@@ -181,9 +175,6 @@ void setup_rcc(void)
 			RCC_APB2Periph_GPIOD |
 			RCC_APB2Periph_USART1 |
 			RCC_APB2Periph_AFIO, ENABLE);
-
-	/* Enable FSMC, GPIOD, GPIOE, GPIOF, GPIOG and AFIO clocks */
-	RCC_AHBPeriphClockCmd(RCC_AHBPeriph_FSMC, ENABLE);
 }
 
 /**
@@ -321,51 +312,6 @@ void setup_rtc(void)
 
 	/* Wait until last write operation on RTC registers has finished */
 	RTC_WaitForLastTask();
-}
-
-/**
-  * @brief  Configures timer controller
-  * @param  None
-  * @retval None
-  */
-void setup_timer(void)
-{
-	TIM_TimeBaseInitTypeDef tim_init;
-	TIM_OCInitTypeDef tim_oc_init;
-	RCC_ClocksTypeDef RCC_ClockFreq;
-	uint16_t ccr_value;
-
-	/* Set CCR value based on PCLK1 frequency and desired buzzer frequency */
-	RCC_GetClocksFreq(&RCC_ClockFreq);
-	ccr_value = (RCC_ClockFreq.PCLK1_Frequency / 5000);
-
-	/* Configure timer */
-	tim_init.TIM_Prescaler = 0;
-	tim_init.TIM_Period = (SystemCoreClock / 5000) - 1;
-	tim_init.TIM_CounterMode = TIM_CounterMode_Up;
-	tim_init.TIM_ClockDivision = 0;
-	TIM_TimeBaseInit(PWM_TIMER, &tim_init);
-
-	/* Channel 1 configuration in PWM mode */
-	tim_oc_init.TIM_OCMode = TIM_OCMode_PWM1;
-	tim_oc_init.TIM_OutputState = TIM_OutputState_Enable;
-	tim_oc_init.TIM_OutputNState = TIM_OutputNState_Enable;
-	tim_oc_init.TIM_Pulse = (SystemCoreClock / 5000 / 2) - 1;
-	tim_oc_init.TIM_OCPolarity = TIM_OCPolarity_Low;
-	tim_oc_init.TIM_OCNPolarity = TIM_OCNPolarity_High;
-	tim_oc_init.TIM_OCIdleState = TIM_OCIdleState_Set;
-	tim_oc_init.TIM_OCNIdleState = TIM_OCIdleState_Reset;
-
-	TIM_OC3Init(PWM_TIMER, &tim_oc_init);
-
-	TIM_OC3PreloadConfig(PWM_TIMER, TIM_OCPreload_Enable);
-	TIM_ARRPreloadConfig(PWM_TIMER, ENABLE);
-
-	/* Timer main output enable */
-	TIM_CtrlPWMOutputs(PWM_TIMER, ENABLE);
-
-	/* Timer counter enable */
-	TIM_Cmd(PWM_TIMER, ENABLE);
 }
 
 /**
@@ -592,11 +538,11 @@ void blink_task(void *pvParameters)
 	assert_param(task);
 
 	display_init();
+	display_set_backlight(50);
 	display_test();
 
 	for (;;)
 	{
-		//vTaskDelayUntil(&last_wake, (1 * MS_PER_SEC) / portTICK_RATE_MS);
 		vTaskDelayUntil(&last_wake, 500);
 		blink_toggle_green1();
 #if 0

@@ -85,6 +85,14 @@ int display_fill(uint16_t color);
  */
 int display_fill_rect(const struct display_rect *rect, uint16_t color);
 
+/**
+ * @brief  Set the intensity of the backlight
+ * @param  percent The percent brightness value (0 - 100)
+ * @retval On success, 0 is returned.
+ *         On failure, a negative number is returned.
+ */
+int display_set_backlight(uint8_t percent);
+
 enum display_op_type
 {
 	DISPLAY_OP_DONE,	/* Indicates no more operations */
